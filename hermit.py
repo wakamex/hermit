@@ -310,10 +310,10 @@ def build_bwrap_args(group: dict) -> list[str]:
     if claude_share.exists():
         args.extend(["--ro-bind", str(claude_share), str(claude_share)])
 
-    # Mount gh CLI if available (linuxbrew)
-    linuxbrew_bin = Path("/home/linuxbrew/.linuxbrew/bin")
-    if linuxbrew_bin.exists():
-        args.extend(["--ro-bind", str(linuxbrew_bin), str(linuxbrew_bin)])
+    # Mount linuxbrew if available (for gh, etc.)
+    linuxbrew = Path("/home/linuxbrew/.linuxbrew")
+    if linuxbrew.exists():
+        args.extend(["--ro-bind", str(linuxbrew), str(linuxbrew)])
 
     # Mount gh config for authentication
     gh_config = home / ".config" / "gh"
@@ -323,8 +323,8 @@ def build_bwrap_args(group: dict) -> list[str]:
 
     # Build PATH with available tools
     path_parts = [str(claude_bin), "/usr/bin", "/bin"]
-    if linuxbrew_bin.exists():
-        path_parts.insert(0, str(linuxbrew_bin))
+    if linuxbrew.exists():
+        path_parts.insert(0, str(linuxbrew / "bin"))
 
     args.extend([
         "--setenv", "HOME", str(home),
