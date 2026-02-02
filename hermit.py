@@ -112,8 +112,9 @@ def build_bwrap_args(group: dict, env_vars: dict) -> list[str]:
     args.extend(["--dir", str(home)])
 
     # Mount Claude directories that exist
+    # Note: .claude needs write access for sessions/cache
     if claude_config.exists():
-        args.extend(["--ro-bind", str(claude_config), str(claude_config)])
+        args.extend(["--bind", str(claude_config), str(claude_config)])
     if claude_bin.exists():
         args.extend([
             "--dir", str(home / ".local"),
@@ -192,7 +193,9 @@ def run_sandbox(group: dict, prompt: str) -> dict:
         # Parse JSON output
         try:
             output = json.loads(result.stdout)
-            return {"status": "success", "result": output}
+            # Extract just the text result
+            text = output.get("result", result.stdout)
+            return {"status": "success", "result": text, "session_id": output.get("session_id")}
         except json.JSONDecodeError:
             # If not JSON, return raw output
             return {"status": "success", "result": result.stdout}
