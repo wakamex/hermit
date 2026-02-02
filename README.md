@@ -27,6 +27,12 @@ python hermit.py daemon
 python hermit.py send "What is 2+2?"
 python hermit.py send -g myproject "Summarize the codebase"
 
+# Pipe or here-doc for complex messages (avoids shell escaping issues)
+echo "Hello!" | python hermit.py send
+python hermit.py send << 'EOF'
+Multi-line message with special chars! 🦞
+EOF
+
 # Interactive REPL
 python hermit.py repl
 python hermit.py repl -g myproject

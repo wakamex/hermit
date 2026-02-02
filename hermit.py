@@ -703,8 +703,16 @@ def cmd_send(args):
     """Send a message."""
     prompt = " ".join(args.prompt) if args.prompt else None
 
+    # Read from stdin if no prompt provided (allows piping and here-docs)
     if not prompt:
-        print("Error: No prompt provided", file=sys.stderr)
+        if not sys.stdin.isatty():
+            prompt = sys.stdin.read().strip()
+        else:
+            print("Error: No prompt provided. Use: hermit send 'message' or pipe input.", file=sys.stderr)
+            sys.exit(1)
+
+    if not prompt:
+        print("Error: Empty prompt", file=sys.stderr)
         sys.exit(1)
 
     response = send_to_daemon({
