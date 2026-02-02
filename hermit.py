@@ -37,7 +37,9 @@ SCHEDULER_INTERVAL = 60  # Check for due tasks every 60 seconds
 HOT_RELOAD_INTERVAL = 2  # Check for code changes every 2 seconds
 
 # Tools directory
-TOOLS_DIR = Path.home() / ".hermit" / "tools"
+HERMIT_DIR = Path.home() / ".hermit"
+TOOLS_DIR = HERMIT_DIR / "tools"
+CONFIG_DIR = HERMIT_DIR / "config"  # For tool configs (gh, etc.)
 
 # Static binary URLs (x86_64 Linux)
 TOOL_URLS = {
@@ -386,11 +388,11 @@ def build_bwrap_args(group: dict) -> list[str]:
     if TOOLS_DIR.exists():
         args.extend(["--ro-bind", str(TOOLS_DIR), str(TOOLS_DIR)])
 
-    # Mount gh config for authentication
-    gh_config = home / ".config" / "gh"
-    if gh_config.exists():
+    # Mount hermit's own config directory as ~/.config (for gh auth, etc.)
+    hermit_gh_config = CONFIG_DIR / "gh"
+    if hermit_gh_config.exists():
         args.extend(["--dir", str(home / ".config")])
-        args.extend(["--ro-bind", str(gh_config), str(gh_config)])
+        args.extend(["--bind", str(hermit_gh_config), str(home / ".config" / "gh")])
 
     # Build PATH with available tools
     path_parts = [str(claude_bin), "/usr/bin", "/bin"]
@@ -853,6 +855,37 @@ def cmd_tools_list(args):
             print(f"  hermit tools install {name}")
 
 
+def cmd_auth(args):
+    """Authenticate a tool for hermit's sandbox."""
+    tool = args.tool
+
+    if tool == "gh":
+        # Create hermit's gh config directory
+        gh_config_dir = CONFIG_DIR / "gh"
+        gh_config_dir.mkdir(parents=True, exist_ok=True)
+
+        # Check if gh is installed
+        gh_path = TOOLS_DIR / "gh"
+        if not gh_path.exists():
+            print("gh not installed. Installing...")
+            result = install_tool("gh")
+            if result.get("status") == "error":
+                print(f"Error: {result.get('error')}")
+                sys.exit(1)
+
+        # Run gh auth login with hermit's config
+        env = os.environ.copy()
+        env["GH_CONFIG_DIR"] = str(gh_config_dir)
+
+        print(f"Authenticating gh for hermit (config: {gh_config_dir})")
+        subprocess.run([str(gh_path), "auth", "login", "-h", "github.com"], env=env)
+
+        print(f"\nDone. gh auth stored in {gh_config_dir}")
+    else:
+        print(f"Unknown tool: {tool}. Supported: gh")
+        sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Hermit - Personal Claude assistant with bwrap sandboxing"
@@ -908,6 +941,11 @@ def main():
     p_task_rm = task_sub.add_parser("rm", help="Remove a task")
     p_task_rm.add_argument("task_id", help="Task ID to remove")
     p_task_rm.set_defaults(func=cmd_task_rm)
+
+    # auth
+    p_auth = subparsers.add_parser("auth", help="Authenticate tools for sandbox")
+    p_auth.add_argument("tool", help="Tool to authenticate (gh)")
+    p_auth.set_defaults(func=cmd_auth)
 
     # tools (subcommand group)
     p_tools = subparsers.add_parser("tools", help="Manage sandbox tools")
