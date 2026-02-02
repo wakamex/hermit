@@ -36,6 +36,19 @@ PID_FILE = DATA_DIR / "hermit.pid"
 SCHEDULER_INTERVAL = 60  # Check for due tasks every 60 seconds
 HOT_RELOAD_INTERVAL = 2  # Check for code changes every 2 seconds
 
+# Tools directory
+TOOLS_DIR = Path.home() / ".hermit" / "tools"
+
+# Static binary URLs (x86_64 Linux)
+TOOL_URLS = {
+    "gh": "https://github.com/cli/cli/releases/download/v2.65.0/gh_2.65.0_linux_amd64.tar.gz",
+    "jq": "https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64",
+    "yq": "https://github.com/mikefarah/yq/releases/download/v4.44.1/yq_linux_amd64",
+    "rg": "https://github.com/BurntSushi/ripgrep/releases/download/14.1.0/ripgrep-14.1.0-x86_64-unknown-linux-musl.tar.gz",
+    "fd": "https://github.com/sharkdp/fd/releases/download/v10.2.0/fd-v10.2.0-x86_64-unknown-linux-musl.tar.gz",
+    "fzf": "https://github.com/junegunn/fzf/releases/download/v0.56.3/fzf-0.56.3-linux_amd64.tar.gz",
+}
+
 # ============================================================================
 # Database
 # ============================================================================
@@ -241,6 +254,65 @@ def get_due_tasks() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def install_tool(name: str) -> dict:
+    """Download and install a tool to ~/.hermit/tools/"""
+    import tarfile
+    import urllib.request
+    import shutil
+
+    if name not in TOOL_URLS:
+        available = ", ".join(TOOL_URLS.keys())
+        return {"status": "error", "error": f"Unknown tool: {name}. Available: {available}"}
+
+    TOOLS_DIR.mkdir(parents=True, exist_ok=True)
+    url = TOOL_URLS[name]
+    tool_path = TOOLS_DIR / name
+
+    print(f"Downloading {name}...")
+
+    try:
+        if url.endswith(".tar.gz"):
+            # Download and extract tarball
+            tmp_tar = TOOLS_DIR / f"{name}.tar.gz"
+            urllib.request.urlretrieve(url, tmp_tar)
+
+            with tarfile.open(tmp_tar, "r:gz") as tar:
+                # Find the binary in the archive
+                for member in tar.getmembers():
+                    if member.name.endswith(f"/{name}") or member.name == name:
+                        member.name = name  # Flatten path
+                        tar.extract(member, TOOLS_DIR)
+                        break
+                else:
+                    # Try to find binary by common patterns
+                    for member in tar.getmembers():
+                        basename = Path(member.name).name
+                        if basename == name or basename.startswith(name):
+                            if member.isfile():
+                                member.name = name
+                                tar.extract(member, TOOLS_DIR)
+                                break
+
+            tmp_tar.unlink()
+        else:
+            # Direct binary download
+            urllib.request.urlretrieve(url, tool_path)
+
+        # Make executable
+        tool_path.chmod(0o755)
+        return {"status": "ok", "message": f"Installed {name} to {tool_path}"}
+
+    except Exception as e:
+        return {"status": "error", "error": f"Failed to install {name}: {e}"}
+
+
+def list_tools() -> list[str]:
+    """List installed tools."""
+    if not TOOLS_DIR.exists():
+        return []
+    return [f.name for f in TOOLS_DIR.iterdir() if f.is_file() and os.access(f, os.X_OK)]
+
+
 def log_message(group_folder: str, role: str, content: str):
     """Append message to group's history file."""
     history_file = GROUPS_DIR / group_folder / "history.txt"
@@ -310,10 +382,9 @@ def build_bwrap_args(group: dict) -> list[str]:
     if claude_share.exists():
         args.extend(["--ro-bind", str(claude_share), str(claude_share)])
 
-    # Mount linuxbrew if available (for gh, etc.)
-    linuxbrew = Path("/home/linuxbrew/.linuxbrew")
-    if linuxbrew.exists():
-        args.extend(["--ro-bind", str(linuxbrew), str(linuxbrew)])
+    # Mount hermit tools directory
+    if TOOLS_DIR.exists():
+        args.extend(["--ro-bind", str(TOOLS_DIR), str(TOOLS_DIR)])
 
     # Mount gh config for authentication
     gh_config = home / ".config" / "gh"
@@ -323,8 +394,8 @@ def build_bwrap_args(group: dict) -> list[str]:
 
     # Build PATH with available tools
     path_parts = [str(claude_bin), "/usr/bin", "/bin"]
-    if linuxbrew.exists():
-        path_parts.insert(0, str(linuxbrew / "bin"))
+    if TOOLS_DIR.exists():
+        path_parts.insert(0, str(TOOLS_DIR))
 
     args.extend([
         "--setenv", "HOME", str(home),
@@ -756,6 +827,32 @@ def cmd_task_rm(args):
     print(response.get("message"))
 
 
+def cmd_tools_install(args):
+    """Install a tool."""
+    result = install_tool(args.tool)
+    if result.get("status") == "error":
+        print(f"Error: {result.get('error')}", file=sys.stderr)
+        sys.exit(1)
+    print(result.get("message"))
+
+
+def cmd_tools_list(args):
+    """List installed tools."""
+    tools = list_tools()
+    if not tools:
+        print("No tools installed. Available:")
+        for name in TOOL_URLS:
+            print(f"  hermit tools install {name}")
+        return
+    print("Installed tools:")
+    for t in tools:
+        print(f"  {t}")
+    print("\nAvailable:")
+    for name in TOOL_URLS:
+        if name not in tools:
+            print(f"  hermit tools install {name}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Hermit - Personal Claude assistant with bwrap sandboxing"
@@ -812,6 +909,19 @@ def main():
     p_task_rm.add_argument("task_id", help="Task ID to remove")
     p_task_rm.set_defaults(func=cmd_task_rm)
 
+    # tools (subcommand group)
+    p_tools = subparsers.add_parser("tools", help="Manage sandbox tools")
+    tools_sub = p_tools.add_subparsers(dest="tools_cmd")
+
+    # tools install
+    p_tools_install = tools_sub.add_parser("install", help="Install a tool")
+    p_tools_install.add_argument("tool", help="Tool name (gh, jq, yq, rg, fd, fzf)")
+    p_tools_install.set_defaults(func=cmd_tools_install)
+
+    # tools list
+    p_tools_list = tools_sub.add_parser("list", help="List installed/available tools")
+    p_tools_list.set_defaults(func=cmd_tools_list)
+
     # init (standalone, no daemon)
     p_init = subparsers.add_parser("init", help="Initialize database")
     p_init.set_defaults(func=lambda a: (init_db(), print(f"Database initialized at {DB_PATH}")))
@@ -824,6 +934,10 @@ def main():
 
     if args.command == "task" and getattr(args, "task_cmd", None) is None:
         p_task.print_help()
+        sys.exit(1)
+
+    if args.command == "tools" and getattr(args, "tools_cmd", None) is None:
+        p_tools.print_help()
         sys.exit(1)
 
     args.func(args)
