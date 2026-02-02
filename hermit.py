@@ -240,6 +240,19 @@ def get_due_tasks() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def log_message(group_folder: str, role: str, content: str):
+    """Append message to group's history file."""
+    history_file = GROUPS_DIR / group_folder / "history.txt"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    with open(history_file, "a") as f:
+        f.write(f"--- {timestamp} ---\n")
+        if role == "user":
+            f.write(f"> {content}\n\n")
+        else:
+            f.write(f"{content}\n\n")
+
+
 def update_task_after_run(task_id: str, result: str, cron: str):
     """Update task after execution."""
     now = datetime.now()
@@ -372,11 +385,16 @@ class Daemon:
                     group = get_or_create_group(task["group_name"])
                     result = run_sandbox(group, task["prompt"], group.get("session_id"))
 
+                    # Log to history
+                    log_message(group["folder"], "user", f"[task:{task['id']}] {task['prompt']}")
+                    result_text = result.get("result", result.get("error", ""))
+                    if result_text:
+                        log_message(group["folder"], "assistant", result_text)
+
                     # Update session if task uses group context
                     if result.get("session_id"):
                         update_session(task["group_name"], result["session_id"])
 
-                    result_text = result.get("result", result.get("error", ""))
                     update_task_after_run(task["id"], result_text, task["cron"])
                     print(f"Task {task['id']} completed")
             except Exception as e:
@@ -400,6 +418,11 @@ class Daemon:
 
             group = get_or_create_group(group_name)
             result = run_sandbox(group, prompt, group.get("session_id"))
+
+            # Log to history
+            log_message(group["folder"], "user", prompt)
+            if result.get("result"):
+                log_message(group["folder"], "assistant", result["result"])
 
             if result.get("session_id"):
                 update_session(group_name, result["session_id"])
