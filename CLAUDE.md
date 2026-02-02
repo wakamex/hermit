@@ -20,6 +20,15 @@ Daemon + CLI client pattern:
 | `new [-g GROUP]` | Clear session |
 | `status` | Check daemon |
 
+## Key Files
+
+| File | Purpose |
+|------|---------|
+| `hermit.py` | Single-file implementation |
+| `data/hermit.db` | SQLite database |
+| `data/hermit.sock` | Unix socket |
+| `groups/<name>/` | Per-group workspace |
+
 ## Key Functions
 
 | Function | Purpose |
@@ -44,3 +53,8 @@ python hermit.py daemon
 python hermit.py send "hello"
 python hermit.py repl
 ```
+
+## TODO
+
+- [ ] Scheduled tasks (cron)
+- [ ] Message history logging
