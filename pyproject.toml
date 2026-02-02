@@ -1,0 +1,13 @@
+[project]
+name = "hermit"
+version = "0.1.0"
+description = "Personal Claude assistant with bwrap sandboxing"
+requires-python = ">=3.10"
+dependencies = []  # stdlib only
+
+[project.scripts]
+hermit = "hermit:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
