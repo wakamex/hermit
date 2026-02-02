@@ -34,6 +34,7 @@ SOCKET_PATH = DATA_DIR / "hermit.sock"
 PID_FILE = DATA_DIR / "hermit.pid"
 
 SCHEDULER_INTERVAL = 60  # Check for due tasks every 60 seconds
+HOT_RELOAD_INTERVAL = 2  # Check for code changes every 2 seconds
 
 # ============================================================================
 # Database
@@ -386,9 +387,26 @@ def run_sandbox(group: dict, prompt: str, session_id: str | None = None) -> dict
 class Daemon:
     """Hermit daemon - manages sessions, scheduler, and handles requests."""
 
-    def __init__(self):
+    def __init__(self, hot_reload=False):
         self.running = False
         self.scheduler_thread = None
+        self.hot_reload = hot_reload
+        self.script_path = Path(__file__).resolve()
+        self.script_mtime = self.script_path.stat().st_mtime
+
+    def check_reload(self):
+        """Check if script changed and re-exec if so."""
+        while self.running and self.hot_reload:
+            try:
+                current_mtime = self.script_path.stat().st_mtime
+                if current_mtime != self.script_mtime:
+                    print("\nCode changed, reloading...")
+                    SOCKET_PATH.unlink(missing_ok=True)
+                    PID_FILE.unlink(missing_ok=True)
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
+            except Exception as e:
+                print(f"Reload check error: {e}")
+            time.sleep(HOT_RELOAD_INTERVAL)
 
     def run_scheduler(self):
         """Scheduler loop - runs due tasks."""
@@ -513,6 +531,12 @@ class Daemon:
         self.scheduler_thread = threading.Thread(target=self.run_scheduler, daemon=True)
         self.scheduler_thread.start()
 
+        # Start hot reload thread if enabled
+        if self.hot_reload:
+            reload_thread = threading.Thread(target=self.check_reload, daemon=True)
+            reload_thread.start()
+            print("Hot reload enabled")
+
         try:
             while self.running:
                 conn, _ = sock.accept()
@@ -570,7 +594,7 @@ def cmd_daemon(args):
             print(f"  hermit daemon --force")
             sys.exit(1)
 
-    daemon = Daemon()
+    daemon = Daemon(hot_reload=args.reload)
     daemon.run()
 
 
@@ -741,6 +765,7 @@ def main():
     # daemon
     p_daemon = subparsers.add_parser("daemon", help="Start the daemon")
     p_daemon.add_argument("-f", "--force", action="store_true", help="Force start (remove stale socket)")
+    p_daemon.add_argument("-r", "--reload", action="store_true", help="Hot reload on code changes")
     p_daemon.set_defaults(func=cmd_daemon)
 
     # send
