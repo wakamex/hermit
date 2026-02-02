@@ -640,10 +640,19 @@ class Daemon:
             time.sleep(HOT_RELOAD_INTERVAL)
 
     def run_scheduler(self):
-        """Scheduler loop - runs due tasks."""
+        """Scheduler loop - runs due tasks and updates usage every 5 min."""
         print("Scheduler started")
+        usage_update_counter = 0
         while self.running:
             try:
+                # Update usage stats every 5 minutes
+                usage_update_counter += 1
+                if usage_update_counter >= 5:
+                    usage_update_counter = 0
+                    usage = calculate_usage()
+                    central_file = CLAUDE_DIR / "usage-limits.json"
+                    central_file.write_text(json.dumps(usage, indent=2))
+
                 due_tasks = get_due_tasks()
                 for task in due_tasks:
                     print(f"Running task {task['id']}: {task['prompt'][:50]}...")
