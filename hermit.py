@@ -547,9 +547,12 @@ def send_to_daemon(request: dict) -> dict:
 def cmd_daemon(args):
     """Start the daemon."""
     if SOCKET_PATH.exists():
-        print("Daemon may already be running. Remove socket to force start:")
-        print(f"  rm {SOCKET_PATH}")
-        sys.exit(1)
+        if args.force:
+            SOCKET_PATH.unlink()
+        else:
+            print("Daemon may already be running. Use --force to override:")
+            print(f"  hermit daemon --force")
+            sys.exit(1)
 
     daemon = Daemon()
     daemon.run()
@@ -721,6 +724,7 @@ def main():
 
     # daemon
     p_daemon = subparsers.add_parser("daemon", help="Start the daemon")
+    p_daemon.add_argument("-f", "--force", action="store_true", help="Force start (remove stale socket)")
     p_daemon.set_defaults(func=cmd_daemon)
 
     # send
