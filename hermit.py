@@ -525,6 +525,8 @@ def calculate_usage() -> dict:
 
     credits_5h = 0
     credits_7d = 0
+    earliest_5h = None  # Track oldest message in 5h window
+    seen_ids = set()  # Deduplicate by message ID
 
     for session_dir in USAGE_SESSION_DIRS:
         if not session_dir.exists():
@@ -559,6 +561,11 @@ def calculate_usage() -> dict:
                                 continue
 
                             msg = entry.get("message", {})
+                            msg_id = msg.get("id")
+                            if msg_id:
+                                if msg_id in seen_ids:
+                                    continue
+                                seen_ids.add(msg_id)
                             usage = msg.get("usage", {})
                             model_id = (msg.get("model") or "").lower()
                             model = "haiku" if "haiku" in model_id else "sonnet" if "sonnet" in model_id else "opus"
@@ -571,6 +578,8 @@ def calculate_usage() -> dict:
                             credits_7d += credits
                             if timestamp >= five_hours_ago:
                                 credits_5h += credits
+                                if earliest_5h is None or timestamp < earliest_5h:
+                                    earliest_5h = timestamp
 
                         except:
                             continue
@@ -580,9 +589,12 @@ def calculate_usage() -> dict:
     plan = get_plan()
     limits = PLAN_LIMITS.get(plan, PLAN_LIMITS["pro"])
 
+    # Calculate when oldest 5h usage will drop off
+    resets_at = (earliest_5h + timedelta(hours=5)).isoformat() if earliest_5h else None
+
     return {
         "plan": plan,
-        "5h": {"used": credits_5h, "limit": limits["5h"], "pct": min(100, credits_5h / limits["5h"] * 100)},
+        "5h": {"used": credits_5h, "limit": limits["5h"], "pct": min(100, credits_5h / limits["5h"] * 100), "resets_at": resets_at},
         "7d": {"used": credits_7d, "limit": limits["7d"], "pct": min(100, credits_7d / limits["7d"] * 100)},
         "updated_at": now.isoformat(),
     }
