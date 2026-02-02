@@ -3,10 +3,13 @@
 Hermit - Personal Claude assistant with bwrap sandboxing
 
 Usage:
-    hermit daemon              Start the daemon
-    hermit send -g GROUP MSG   Send message to group
-    hermit groups              List groups
-    hermit status              Check daemon status
+    hermit daemon                     Start the daemon
+    hermit send -g GROUP MSG          Send message to group
+    hermit task add -g GROUP CRON MSG Schedule a task
+    hermit task list                  List scheduled tasks
+    hermit task rm ID                 Remove a task
+    hermit groups                     List groups
+    hermit status                     Check daemon status
 """
 
 import argparse
@@ -17,6 +20,9 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
+import uuid
+from datetime import datetime
 from pathlib import Path
 
 # Paths
@@ -26,6 +32,8 @@ DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "hermit.db"
 SOCKET_PATH = DATA_DIR / "hermit.sock"
 PID_FILE = DATA_DIR / "hermit.pid"
+
+SCHEDULER_INTERVAL = 60  # Check for due tasks every 60 seconds
 
 # ============================================================================
 # Database
@@ -52,6 +60,20 @@ def init_db():
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (group_id) REFERENCES groups(id)
         );
+
+        CREATE TABLE IF NOT EXISTS tasks (
+            id TEXT PRIMARY KEY,
+            group_name TEXT NOT NULL,
+            cron TEXT NOT NULL,
+            prompt TEXT NOT NULL,
+            next_run TEXT,
+            last_run TEXT,
+            last_result TEXT,
+            status TEXT DEFAULT 'active',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_tasks_next_run ON tasks(next_run);
+        CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
     """)
     conn.close()
 
@@ -89,7 +111,7 @@ def get_or_create_group(name: str) -> dict:
     return group
 
 
-def update_session(group_name: str, session_id: str):
+def update_session(group_name: str, session_id: str | None):
     """Update the session ID for a group."""
     conn = get_db()
     conn.execute("UPDATE groups SET session_id = ? WHERE name = ?", (session_id, group_name))
@@ -103,6 +125,113 @@ def list_groups() -> list[dict]:
     rows = conn.execute("SELECT name, folder, session_id, created_at FROM groups ORDER BY name").fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+# ============================================================================
+# Tasks / Scheduler
+# ============================================================================
+
+def parse_cron(cron: str) -> dict | None:
+    """Parse simple cron expression. Supports: @hourly, @daily, @weekly, or '*/N' for minutes."""
+    cron = cron.strip().lower()
+
+    if cron == "@hourly":
+        return {"type": "interval", "minutes": 60}
+    elif cron == "@daily":
+        return {"type": "interval", "minutes": 1440}
+    elif cron == "@weekly":
+        return {"type": "interval", "minutes": 10080}
+    elif cron.startswith("*/"):
+        try:
+            minutes = int(cron[2:])
+            if minutes > 0:
+                return {"type": "interval", "minutes": minutes}
+        except ValueError:
+            pass
+
+    return None
+
+
+def calc_next_run(cron: str, from_time: datetime | None = None) -> str | None:
+    """Calculate next run time based on cron expression."""
+    parsed = parse_cron(cron)
+    if not parsed:
+        return None
+
+    base = from_time or datetime.now()
+    if parsed["type"] == "interval":
+        next_time = base.timestamp() + (parsed["minutes"] * 60)
+        return datetime.fromtimestamp(next_time).isoformat()
+
+    return None
+
+
+def create_task(group_name: str, cron: str, prompt: str) -> dict:
+    """Create a scheduled task."""
+    parsed = parse_cron(cron)
+    if not parsed:
+        return {"status": "error", "error": f"Invalid cron: {cron}. Use @hourly, @daily, @weekly, or */N"}
+
+    task_id = str(uuid.uuid4())[:8]
+    next_run = calc_next_run(cron)
+
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO tasks (id, group_name, cron, prompt, next_run, status) VALUES (?, ?, ?, ?, ?, 'active')",
+        (task_id, group_name, cron, prompt, next_run)
+    )
+    conn.commit()
+    conn.close()
+
+    return {"status": "ok", "task_id": task_id, "next_run": next_run}
+
+
+def list_tasks() -> list[dict]:
+    """List all tasks."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT id, group_name, cron, prompt, next_run, last_run, last_result, status FROM tasks ORDER BY created_at"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete_task(task_id: str) -> dict:
+    """Delete a task."""
+    conn = get_db()
+    cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+    conn.commit()
+    conn.close()
+
+    if cur.rowcount > 0:
+        return {"status": "ok", "message": f"Task {task_id} deleted"}
+    return {"status": "error", "error": f"Task {task_id} not found"}
+
+
+def get_due_tasks() -> list[dict]:
+    """Get tasks that are due to run."""
+    now = datetime.now().isoformat()
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM tasks WHERE status = 'active' AND next_run IS NOT NULL AND next_run <= ?",
+        (now,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def update_task_after_run(task_id: str, result: str, cron: str):
+    """Update task after execution."""
+    now = datetime.now()
+    next_run = calc_next_run(cron, now)
+
+    conn = get_db()
+    conn.execute(
+        "UPDATE tasks SET last_run = ?, last_result = ?, next_run = ? WHERE id = ?",
+        (now.isoformat(), result[:500], next_run, task_id)
+    )
+    conn.commit()
+    conn.close()
 
 
 # ============================================================================
@@ -163,7 +292,6 @@ def run_sandbox(group: dict, prompt: str, session_id: str | None = None) -> dict
 
     cmd = bwrap_args + ["claude", "-p", "--output-format", "json"]
 
-    # Continue existing session if we have one
     if session_id:
         cmd.extend(["--resume", session_id])
 
@@ -204,10 +332,34 @@ def run_sandbox(group: dict, prompt: str, session_id: str | None = None) -> dict
 # ============================================================================
 
 class Daemon:
-    """Hermit daemon - manages sessions and handles requests."""
+    """Hermit daemon - manages sessions, scheduler, and handles requests."""
 
     def __init__(self):
         self.running = False
+        self.scheduler_thread = None
+
+    def run_scheduler(self):
+        """Scheduler loop - runs due tasks."""
+        print("Scheduler started")
+        while self.running:
+            try:
+                due_tasks = get_due_tasks()
+                for task in due_tasks:
+                    print(f"Running task {task['id']}: {task['prompt'][:50]}...")
+                    group = get_or_create_group(task["group_name"])
+                    result = run_sandbox(group, task["prompt"], group.get("session_id"))
+
+                    # Update session if task uses group context
+                    if result.get("session_id"):
+                        update_session(task["group_name"], result["session_id"])
+
+                    result_text = result.get("result", result.get("error", ""))
+                    update_task_after_run(task["id"], result_text, task["cron"])
+                    print(f"Task {task['id']} completed")
+            except Exception as e:
+                print(f"Scheduler error: {e}")
+
+            time.sleep(SCHEDULER_INTERVAL)
 
     def handle_request(self, data: dict) -> dict:
         """Handle a request from a client."""
@@ -226,7 +378,6 @@ class Daemon:
             group = get_or_create_group(group_name)
             result = run_sandbox(group, prompt, group.get("session_id"))
 
-            # Save session for continuity
             if result.get("session_id"):
                 update_session(group_name, result["session_id"])
 
@@ -239,6 +390,19 @@ class Daemon:
             group_name = data.get("group", "default")
             update_session(group_name, None)
             return {"status": "ok", "message": f"Session cleared for {group_name}"}
+
+        elif cmd == "task_add":
+            return create_task(
+                data.get("group", "default"),
+                data.get("cron", ""),
+                data.get("prompt", "")
+            )
+
+        elif cmd == "task_list":
+            return {"status": "ok", "tasks": list_tasks()}
+
+        elif cmd == "task_rm":
+            return delete_task(data.get("task_id", ""))
 
         else:
             return {"status": "error", "error": f"Unknown command: {cmd}"}
@@ -271,11 +435,9 @@ class Daemon:
         """Run the daemon."""
         init_db()
 
-        # Remove stale socket
         if SOCKET_PATH.exists():
             SOCKET_PATH.unlink()
 
-        # Write PID file
         PID_FILE.write_text(str(os.getpid()))
 
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -284,6 +446,10 @@ class Daemon:
 
         print(f"Hermit daemon listening on {SOCKET_PATH}")
         self.running = True
+
+        # Start scheduler thread
+        self.scheduler_thread = threading.Thread(target=self.run_scheduler, daemon=True)
+        self.scheduler_thread.start()
 
         try:
             while self.running:
@@ -294,6 +460,7 @@ class Daemon:
         except KeyboardInterrupt:
             print("\nShutting down...")
         finally:
+            self.running = False
             sock.close()
             SOCKET_PATH.unlink(missing_ok=True)
             PID_FILE.unlink(missing_ok=True)
@@ -440,6 +607,66 @@ def cmd_repl(args):
             break
 
 
+def cmd_task_add(args):
+    """Add a scheduled task."""
+    prompt = " ".join(args.prompt) if args.prompt else None
+
+    if not prompt:
+        print("Error: No prompt provided", file=sys.stderr)
+        sys.exit(1)
+
+    response = send_to_daemon({
+        "cmd": "task_add",
+        "group": args.group,
+        "cron": args.cron,
+        "prompt": prompt
+    })
+
+    if response.get("status") == "error":
+        print(f"Error: {response.get('error')}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Task {response.get('task_id')} created. Next run: {response.get('next_run')}")
+
+
+def cmd_task_list(args):
+    """List scheduled tasks."""
+    response = send_to_daemon({"cmd": "task_list"})
+
+    if response.get("status") == "error":
+        print(f"Error: {response.get('error')}", file=sys.stderr)
+        sys.exit(1)
+
+    tasks = response.get("tasks", [])
+    if not tasks:
+        print("No scheduled tasks.")
+        return
+
+    for t in tasks:
+        status = t.get("status", "?")
+        print(f"  [{t['id']}] {t['group_name']} | {t['cron']} | {status}")
+        print(f"      Prompt: {t['prompt'][:60]}...")
+        if t.get("next_run"):
+            print(f"      Next: {t['next_run']}")
+        if t.get("last_result"):
+            print(f"      Last: {t['last_result'][:60]}...")
+        print()
+
+
+def cmd_task_rm(args):
+    """Remove a scheduled task."""
+    response = send_to_daemon({
+        "cmd": "task_rm",
+        "task_id": args.task_id
+    })
+
+    if response.get("status") == "error":
+        print(f"Error: {response.get('error')}", file=sys.stderr)
+        sys.exit(1)
+
+    print(response.get("message"))
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Hermit - Personal Claude assistant with bwrap sandboxing"
@@ -474,6 +701,26 @@ def main():
     p_repl.add_argument("-g", "--group", default="default", help="Group name")
     p_repl.set_defaults(func=cmd_repl)
 
+    # task (subcommand group)
+    p_task = subparsers.add_parser("task", help="Manage scheduled tasks")
+    task_sub = p_task.add_subparsers(dest="task_cmd")
+
+    # task add
+    p_task_add = task_sub.add_parser("add", help="Add a scheduled task")
+    p_task_add.add_argument("-g", "--group", default="default", help="Group name")
+    p_task_add.add_argument("-c", "--cron", required=True, help="Schedule: @hourly, @daily, @weekly, or */N (minutes)")
+    p_task_add.add_argument("prompt", nargs="*", help="Task prompt")
+    p_task_add.set_defaults(func=cmd_task_add)
+
+    # task list
+    p_task_list = task_sub.add_parser("list", help="List scheduled tasks")
+    p_task_list.set_defaults(func=cmd_task_list)
+
+    # task rm
+    p_task_rm = task_sub.add_parser("rm", help="Remove a task")
+    p_task_rm.add_argument("task_id", help="Task ID to remove")
+    p_task_rm.set_defaults(func=cmd_task_rm)
+
     # init (standalone, no daemon)
     p_init = subparsers.add_parser("init", help="Initialize database")
     p_init.set_defaults(func=lambda a: (init_db(), print(f"Database initialized at {DB_PATH}")))
@@ -482,6 +729,10 @@ def main():
 
     if args.command is None:
         parser.print_help()
+        sys.exit(1)
+
+    if args.command == "task" and getattr(args, "task_cmd", None) is None:
+        p_task.print_help()
         sys.exit(1)
 
     args.func(args)
