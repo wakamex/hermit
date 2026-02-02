@@ -37,9 +37,18 @@ Supports simple cron expressions:
 | `data/hermit.db` | SQLite database |
 | `data/hermit.sock` | Unix socket |
 | `groups/<name>/` | Per-group workspace |
+| `groups/<name>/CLAUDE.md` | Agent's soul (identity, memory, notes) |
+| `groups/<name>/history.txt` | Chat log (agent can read) |
 | `~/.hermit/.claude/` | Hermit's isolated Claude config |
 | `~/.hermit/tools/` | Installed tools (gh, jq, etc.) |
 | `~/.hermit/config/` | Tool configs (gh auth, etc.) |
+
+## Memory Architecture
+
+- **Soul:** `groups/<name>/CLAUDE.md` - identity, guidelines, persistent notes
+- **History:** `groups/<name>/history.txt` - full chat log, agent can read/grep
+- **Files:** Anything in `groups/<name>/` persists across sessions
+- **Session:** Claude's `--resume` maintains context within a session
 
 ## Key Functions
 

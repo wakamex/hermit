@@ -68,7 +68,22 @@ hermit daemon          CLI client
 Each group gets:
 - Isolated workspace at `groups/<name>/`
 - Persistent session (multi-turn conversations)
-- Own `CLAUDE.md` memory file
+- Own `CLAUDE.md` for identity and memory
+
+## Identity & Memory
+
+The agent's "soul" is its `CLAUDE.md` file:
+
+```
+groups/default/CLAUDE.md   # Identity, guidelines, notes
+groups/default/history.txt # Full chat log (agent can read)
+groups/default/            # Persistent storage for credentials, files
+```
+
+The agent can:
+- Read its chat history from `history.txt`
+- Update `CLAUDE.md` to remember things
+- Store credentials and state in the workspace
 
 ## Session Continuity
 
