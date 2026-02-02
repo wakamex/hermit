@@ -1,0 +1,14 @@
+# Data files (user-specific)
+data/hermit.db
+data/hermit.sock
+data/hermit.pid
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
