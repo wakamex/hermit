@@ -260,6 +260,11 @@ def main():
         action="store_true",
         help="Print the command that would be run without executing"
     )
+    parser.add_argument(
+        "--test-sandbox",
+        action="store_true",
+        help="Test bwrap sandbox with a simple command (no Claude)"
+    )
 
     args = parser.parse_args()
 
@@ -276,6 +281,30 @@ def main():
         cmd = build_command(args.group, prompt)
         print("Command that would be executed:\n")
         print(" \\\n  ".join(cmd))
+        return
+
+    if args.test_sandbox:
+        # Test bwrap with simple commands
+        group = get_or_create_group(args.group)
+        bwrap_args = build_bwrap_args(group, {})
+
+        print("Testing sandbox...")
+
+        tests = [
+            (["echo", "hello from sandbox"], "echo test"),
+            (["ls", "/workspace"], "workspace mount"),
+            (["ls", "/home/user/.claude"], "claude auth mount"),
+            (["touch", "/workspace/test.txt"], "workspace write"),
+            (["rm", "/workspace/test.txt"], "workspace cleanup"),
+        ]
+
+        for cmd_suffix, name in tests:
+            cmd = bwrap_args + cmd_suffix
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            status = "OK" if result.returncode == 0 else f"FAIL: {result.stderr.strip()}"
+            print(f"  {name}: {status}")
+
+        print("\nSandbox test complete.")
         return
 
     if args.prompt:
