@@ -6,31 +6,68 @@ Personal Claude assistant with bwrap sandboxing for Linux.
 
 - Python 3.10+
 - bubblewrap (`bwrap`)
-- Claude Code CLI (native binary)
+- Claude Code CLI
 
 ```bash
 # Install bwrap
 sudo dnf install bubblewrap  # Fedora
 sudo apt install bubblewrap  # Debian/Ubuntu
 
-# Install Claude Code native binary
+# Install Claude Code
 claude install stable
 ```
+
+## Quick Start
+
+```bash
+# Start the daemon
+python hermit.py daemon
+
+# In another terminal
+python hermit.py send "Hello, Hermit!"
+```
+
+## Project Structure
+
+```
+hermit/
+├── hermit.py              # Main script (all you need)
+├── CLAUDE.md.template     # Template for new groups
+├── README.md
+│
+├── data/                  # Runtime (gitignored)
+│   ├── hermit.db          # SQLite database
+│   ├── hermit.sock        # Unix socket
+│   └── hermit.pid         # Daemon PID
+│
+└── groups/                # Runtime (gitignored)
+    └── <group-name>/
+        ├── CLAUDE.md      # Agent's soul: identity, memory, notes
+        ├── history.txt    # Full conversation log
+        ├── .claude/       # Claude session data
+        └── .moltbook/     # Moltbook credentials (if registered)
+```
+
+**Tracked in git:** `hermit.py`, `CLAUDE.md.template`, `README.md`
+**Not tracked (runtime data):** `data/`, `groups/`
+
+When you create a new group, copy `CLAUDE.md.template` to `groups/<name>/CLAUDE.md`.
 
 ## Usage
 
 ```bash
-# Start the daemon (in a terminal or via systemd)
-python hermit.py daemon
-
-# In another terminal:
+# Send a message
 python hermit.py send "What is 2+2?"
 python hermit.py send -g myproject "Summarize the codebase"
 
-# Pipe or here-doc for complex messages (avoids shell escaping issues)
+# Pipe input (avoids shell escaping issues)
 echo "Hello!" | python hermit.py send
+cat prompt.txt | python hermit.py send
+
+# Here-doc for multi-line messages
 python hermit.py send << 'EOF'
 Multi-line message with special chars! 🦞
+No escaping needed.
 EOF
 
 # Interactive REPL
@@ -39,8 +76,57 @@ python hermit.py repl -g myproject
 
 # Manage sessions
 python hermit.py groups          # List groups and session status
-python hermit.py new -g myproject  # Clear session, start fresh
+python hermit.py new             # Clear session, start fresh
+python hermit.py new -g myproject
 python hermit.py status          # Check if daemon is running
+```
+
+## Groups
+
+Each group is an isolated workspace with its own:
+
+| File | Purpose |
+|------|---------|
+| `CLAUDE.md` | Agent's identity, guidelines, and memory |
+| `history.txt` | Complete conversation log |
+| `.claude/` | Claude session state |
+| `*` | Any files the agent creates or downloads |
+
+Groups are isolated from each other and from your home directory.
+
+## Agent Identity & Memory
+
+The agent's "soul" is its `CLAUDE.md` file. The agent can:
+
+- **Read** its conversation history from `history.txt`
+- **Update** `CLAUDE.md` to remember things across sessions
+- **Store** credentials and files in its workspace
+
+Example `CLAUDE.md` structure:
+
+```markdown
+# Hermit
+
+You are Hermit, an autonomous AI agent...
+
+## Memory
+
+### Credentials
+- Moltbook: `/workspace/.moltbook/credentials.json`
+- GitHub: authenticated via GH_TOKEN
+
+### Notes
+- User prefers concise responses
+- Project X uses Python 3.11
+```
+
+## Session Continuity
+
+The daemon tracks Claude session IDs per group. Messages continue the conversation until you clear the session:
+
+```bash
+hermit new              # Clear default group session
+hermit new -g myproject # Clear specific group session
 ```
 
 ## Architecture
@@ -51,50 +137,71 @@ hermit daemon          CLI client
      └──── Unix socket ────┘
               │
          ┌────┴────┐
-         │ SQLite  │  (groups, sessions)
+         │ SQLite  │  sessions, tasks
          └────┬────┘
               │
          ┌────┴────┐
-         │  bwrap  │  (sandbox)
+         │  bwrap  │  namespace isolation
          └────┬────┘
               │
          ┌────┴────┐
-         │ Claude  │  (AI)
+         │ Claude  │  AI agent
          └─────────┘
 ```
 
-## Groups
-
-Each group gets:
-- Isolated workspace at `groups/<name>/`
-- Persistent session (multi-turn conversations)
-- Own `CLAUDE.md` for identity and memory
-
-## Identity & Memory
-
-The agent's "soul" is its `CLAUDE.md` file:
+## Security Model
 
 ```
-groups/default/CLAUDE.md   # Identity, guidelines, notes
-groups/default/history.txt # Full chat log (agent can read)
-groups/default/            # Persistent storage for credentials, files
+Host System (protected)
+└── bwrap sandbox
+    ├── /usr, /lib, /bin       (read-only)
+    ├── ~/.hermit/.claude/     (hermit's config, not yours)
+    ├── ~/.hermit/tools/       (gh, jq, etc.)
+    └── /workspace/            → groups/<name>/ (read-write)
 ```
 
-The agent can:
-- Read its chat history from `history.txt`
-- Update `CLAUDE.md` to remember things
-- Store credentials and state in the workspace
+**Key isolation features:**
 
-## Session Continuity
+1. **Filesystem** - Agent can only write to `/workspace/` (its group directory)
+2. **Config separation** - Hermit has its own `.claude/` directory, no access to your plugins/skills/settings
+3. **Credential isolation** - Tool credentials passed via env vars, not mounted config files
+4. **Group isolation** - Each group is sandboxed separately
 
-The daemon tracks Claude session IDs per group. Subsequent messages in the same group continue the conversation context.
+This means prompt injection attacks are contained - a malicious skill can't access files outside the sandbox or steal your personal credentials.
 
-Use `hermit new -g GROUP` to clear a session and start fresh.
+## Tools
+
+Install tools for use inside the sandbox:
+
+```bash
+hermit install gh    # GitHub CLI
+hermit install jq    # JSON processor
+
+hermit auth gh       # Authenticate (separate from your personal gh)
+```
+
+Tools use Hermit's own credentials, completely separate from your personal configs.
+
+## Scheduled Tasks
+
+```bash
+# Recurring
+hermit task add -c @hourly "Check for updates"
+hermit task add -c @daily "Morning summary"
+hermit task add -c "*/5" "Every 5 minutes"
+
+# One-time
+hermit task add -c "once:+30m" "Remind me in 30 minutes"
+hermit task add -c "once:2026-02-02T09:00:00" "Meeting prep"
+
+# Manage
+hermit task list
+hermit task rm <id>
+```
 
 ## Systemd Service
 
 ```bash
-# Create user service
 mkdir -p ~/.config/systemd/user
 cat > ~/.config/systemd/user/hermit.service << 'EOF'
 [Unit]
@@ -108,86 +215,20 @@ Restart=always
 WantedBy=default.target
 EOF
 
-# Enable and start
-systemctl --user enable hermit
-systemctl --user start hermit
+systemctl --user enable --now hermit
 ```
 
-## Scheduled Tasks
+## Comparison
 
-```bash
-# Recurring tasks
-hermit task add -c @hourly "Check for updates"
-hermit task add -c @daily "Morning summary"
-hermit task add -c */5 "Run every 5 minutes"
-
-# One-time tasks
-hermit task add -c "once:+30m" "Remind me in 30 minutes"
-hermit task add -c "once:2026-02-02T09:00:00" "Morning meeting prep"
-
-# Manage
-hermit task list
-hermit task rm <id>
-```
-
-## History
-
-All messages are logged to `groups/<name>/history.txt` for easy viewing:
-
-```bash
-tail -f groups/default/history.txt
-```
-
-## Background
-
-Hermit is a Linux-native, security-focused alternative to projects like Clawdbot/OpenClaw.
-
-### Related Projects
-
-| Project | Security | Platform | Input |
-|---------|----------|----------|-------|
-| [Clawdbot/OpenClaw](https://github.com/VoltAgent/awesome-clawdbot-skills) | None (full system access) | Multi-platform | WhatsApp, Telegram, Slack, etc. |
+| Project | Security | Platform | Interface |
+|---------|----------|----------|-----------|
+| [OpenClaw](https://github.com/VoltAgent/awesome-clawdbot-skills) | None (full access) | Any | WhatsApp, Telegram, etc. |
 | [NanoClaw](https://github.com/anthropics/nanoclaw) | Apple Containers | macOS | WhatsApp |
 | **Hermit** | bwrap sandbox | Linux | CLI |
 
-### Why Hermit?
+## Why Hermit?
 
-1. **Security** - Claude runs in a bwrap sandbox, isolated to `groups/<name>/`. No access to your home directory, system files, or other groups.
-
-2. **Linux-native** - Uses bubblewrap (same tech as Flatpak) instead of Docker or Apple Containers.
-
-3. **Minimal** - Single Python file, stdlib only, ~800 lines. No Node.js, no web frameworks.
-
-4. **CLI-first** - No messaging app integration. Just `hermit send "prompt"`.
-
-### Security Model
-
-```
-Host System (protected)
-└── bwrap sandbox
-    ├── /usr, /lib, /bin (read-only)
-    ├── ~/.hermit/.claude (hermit's own config, isolated from user's)
-    ├── ~/.hermit/tools/ (sandboxed tools like gh, jq)
-    └── /workspace → groups/<name>/ (read-write)
-```
-
-**Isolation features:**
-- Claude can only write to the group workspace
-- Hermit has its own `.claude` directory (no access to user's plugins/skills/settings)
-- Tool credentials passed via environment variables (not readable config files)
-- Prompt injection attacks are contained - can't access files outside sandbox
-
-## Tools
-
-Hermit can install and authenticate tools for use inside the sandbox:
-
-```bash
-# Install tools
-hermit install gh    # GitHub CLI
-hermit install jq    # JSON processor
-
-# Authenticate tools (stored in ~/.hermit/config/)
-hermit auth gh       # Login with hermit's own GitHub identity
-```
-
-Tools are isolated from your personal configs - `hermit auth gh` creates a separate GitHub identity from your normal `~/.config/gh`.
+1. **Secure** - bwrap sandbox isolates Claude from your system
+2. **Linux-native** - Uses bubblewrap (same tech as Flatpak)
+3. **Minimal** - Single Python file, stdlib only, ~800 lines
+4. **CLI-first** - No messaging app dependencies
