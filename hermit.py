@@ -132,36 +132,56 @@ def list_groups() -> list[dict]:
 # ============================================================================
 
 def parse_cron(cron: str) -> dict | None:
-    """Parse simple cron expression. Supports: @hourly, @daily, @weekly, or '*/N' for minutes."""
-    cron = cron.strip().lower()
+    """Parse simple cron expression. Supports: @hourly, @daily, @weekly, */N, or once:DATETIME."""
+    cron = cron.strip()
 
-    if cron == "@hourly":
+    if cron.lower() == "@hourly":
         return {"type": "interval", "minutes": 60}
-    elif cron == "@daily":
+    elif cron.lower() == "@daily":
         return {"type": "interval", "minutes": 1440}
-    elif cron == "@weekly":
+    elif cron.lower() == "@weekly":
         return {"type": "interval", "minutes": 10080}
-    elif cron.startswith("*/"):
+    elif cron.lower().startswith("*/"):
         try:
             minutes = int(cron[2:])
             if minutes > 0:
                 return {"type": "interval", "minutes": minutes}
         except ValueError:
             pass
+    elif cron.lower().startswith("once:"):
+        time_str = cron[5:].strip()
+        try:
+            # Support +Nm for "N minutes from now"
+            if time_str.startswith("+") and time_str.endswith("m"):
+                minutes = int(time_str[1:-1])
+                return {"type": "once", "minutes": minutes}
+            # Otherwise parse as ISO datetime
+            run_time = datetime.fromisoformat(time_str)
+            return {"type": "once", "datetime": run_time.isoformat()}
+        except (ValueError, TypeError):
+            pass
 
     return None
 
 
-def calc_next_run(cron: str, from_time: datetime | None = None) -> str | None:
+def calc_next_run(cron: str, from_time: datetime | None = None, after_run: bool = False) -> str | None:
     """Calculate next run time based on cron expression."""
     parsed = parse_cron(cron)
     if not parsed:
         return None
 
     base = from_time or datetime.now()
+
     if parsed["type"] == "interval":
         next_time = base.timestamp() + (parsed["minutes"] * 60)
         return datetime.fromtimestamp(next_time).isoformat()
+    elif parsed["type"] == "once":
+        if after_run:
+            return None  # No next run after one-time task completes
+        if "minutes" in parsed:
+            next_time = base.timestamp() + (parsed["minutes"] * 60)
+            return datetime.fromtimestamp(next_time).isoformat()
+        return parsed.get("datetime")
 
     return None
 
@@ -170,7 +190,7 @@ def create_task(group_name: str, cron: str, prompt: str) -> dict:
     """Create a scheduled task."""
     parsed = parse_cron(cron)
     if not parsed:
-        return {"status": "error", "error": f"Invalid cron: {cron}. Use @hourly, @daily, @weekly, or */N"}
+        return {"status": "error", "error": f"Invalid cron: {cron}. Use @hourly, @daily, @weekly, */N, once:+Nm, or once:DATETIME"}
 
     task_id = str(uuid.uuid4())[:8]
     next_run = calc_next_run(cron)
@@ -223,12 +243,15 @@ def get_due_tasks() -> list[dict]:
 def update_task_after_run(task_id: str, result: str, cron: str):
     """Update task after execution."""
     now = datetime.now()
-    next_run = calc_next_run(cron, now)
+    next_run = calc_next_run(cron, now, after_run=True)
+
+    # One-time tasks get marked completed
+    status = "completed" if next_run is None else "active"
 
     conn = get_db()
     conn.execute(
-        "UPDATE tasks SET last_run = ?, last_result = ?, next_run = ? WHERE id = ?",
-        (now.isoformat(), result[:500], next_run, task_id)
+        "UPDATE tasks SET last_run = ?, last_result = ?, next_run = ?, status = ? WHERE id = ?",
+        (now.isoformat(), result[:500], next_run, status, task_id)
     )
     conn.commit()
     conn.close()
@@ -708,7 +731,7 @@ def main():
     # task add
     p_task_add = task_sub.add_parser("add", help="Add a scheduled task")
     p_task_add.add_argument("-g", "--group", default="default", help="Group name")
-    p_task_add.add_argument("-c", "--cron", required=True, help="Schedule: @hourly, @daily, @weekly, or */N (minutes)")
+    p_task_add.add_argument("-c", "--cron", required=True, help="Schedule: @hourly, @daily, @weekly, */N (minutes), once:+Nm, once:DATETIME")
     p_task_add.add_argument("prompt", nargs="*", help="Task prompt")
     p_task_add.set_defaults(func=cmd_task_add)
 
