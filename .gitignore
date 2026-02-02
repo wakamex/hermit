@@ -16,3 +16,4 @@ venv/
 # Agent credentials and sessions
 groups/*/.moltbook/
 groups/*/.claude/
+groups/*/history.txt
