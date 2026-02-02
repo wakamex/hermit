@@ -185,6 +185,21 @@ def run_sandbox(group: dict, prompt: str) -> dict:
         return {"status": "error", "error": f"Command not found: {e}"}
 
 
+def build_command(group_name: str, prompt: str) -> list[str]:
+    """Build the full command without running it (for dry-run)."""
+    group = get_or_create_group(group_name)
+    env_vars = {}
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+    if oauth_token:
+        env_vars["CLAUDE_CODE_OAUTH_TOKEN"] = oauth_token
+    elif api_key:
+        env_vars["ANTHROPIC_API_KEY"] = api_key
+
+    bwrap_args = build_bwrap_args(group, env_vars)
+    return bwrap_args + ["claude", "-p", "--output-format", "json", prompt]
+
+
 def chat(group_name: str, prompt: str) -> str:
     """Send a message to Claude in the specified group."""
     group = get_or_create_group(group_name)
@@ -240,6 +255,11 @@ def main():
         action="store_true",
         help="Initialize database and exit"
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the command that would be run without executing"
+    )
 
     args = parser.parse_args()
 
@@ -248,6 +268,14 @@ def main():
 
     if args.init:
         print(f"Database initialized at {DB_PATH}")
+        return
+
+    if args.dry_run:
+        # Show command without running
+        prompt = args.prompt or "PROMPT_HERE"
+        cmd = build_command(args.group, prompt)
+        print("Command that would be executed:\n")
+        print(" \\\n  ".join(cmd))
         return
 
     if args.prompt:
