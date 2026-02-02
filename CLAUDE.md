@@ -37,6 +37,9 @@ Supports simple cron expressions:
 | `data/hermit.db` | SQLite database |
 | `data/hermit.sock` | Unix socket |
 | `groups/<name>/` | Per-group workspace |
+| `~/.hermit/.claude/` | Hermit's isolated Claude config |
+| `~/.hermit/tools/` | Installed tools (gh, jq, etc.) |
+| `~/.hermit/config/` | Tool configs (gh auth, etc.) |
 
 ## Key Functions
 
@@ -47,7 +50,15 @@ Supports simple cron expressions:
 | `Daemon.handle_request()` | Route commands |
 | `run_sandbox()` | Execute Claude in bwrap |
 | `build_bwrap_args()` | Construct sandbox command |
+| `get_gh_token()` | Read GH token from hermit config |
 | `send_to_daemon()` | Client → daemon communication |
+
+## Security Architecture
+
+- Hermit uses `~/.hermit/.claude/` instead of user's `~/.claude/` (no access to user's plugins/skills)
+- Claude credentials copied once from user's config (shares auth, not settings)
+- Tool credentials (gh, etc.) passed via env vars, not mounted config files
+- `/etc/pki` mounted read-only for TLS on Fedora
 
 ## Session Continuity
 

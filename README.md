@@ -145,8 +145,28 @@ Hermit is a Linux-native, security-focused alternative to projects like Clawdbot
 Host System (protected)
 └── bwrap sandbox
     ├── /usr, /lib, /bin (read-only)
-    ├── ~/.claude (read-write, for auth)
+    ├── ~/.hermit/.claude (hermit's own config, isolated from user's)
+    ├── ~/.hermit/tools/ (sandboxed tools like gh, jq)
     └── /workspace → groups/<name>/ (read-write)
 ```
 
-Claude can only write to the group workspace. Prompt injection attacks are contained - a malicious prompt can't access files outside the sandbox or exfiltrate data from other groups.
+**Isolation features:**
+- Claude can only write to the group workspace
+- Hermit has its own `.claude` directory (no access to user's plugins/skills/settings)
+- Tool credentials passed via environment variables (not readable config files)
+- Prompt injection attacks are contained - can't access files outside sandbox
+
+## Tools
+
+Hermit can install and authenticate tools for use inside the sandbox:
+
+```bash
+# Install tools
+hermit install gh    # GitHub CLI
+hermit install jq    # JSON processor
+
+# Authenticate tools (stored in ~/.hermit/config/)
+hermit auth gh       # Login with hermit's own GitHub identity
+```
+
+Tools are isolated from your personal configs - `hermit auth gh` creates a separate GitHub identity from your normal `~/.config/gh`.

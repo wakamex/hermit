@@ -345,6 +345,23 @@ def update_task_after_run(task_id: str, result: str, cron: str):
     conn.close()
 
 
+def get_gh_token() -> str | None:
+    """Read GH token from hermit's config (not user's personal config)."""
+    hosts_file = CONFIG_DIR / "gh" / "hosts.yml"
+    if not hosts_file.exists():
+        return None
+    try:
+        import re
+        content = hosts_file.read_text()
+        # Simple YAML parsing for oauth_token
+        match = re.search(r'oauth_token:\s*(\S+)', content)
+        if match:
+            return match.group(1)
+    except Exception:
+        pass
+    return None
+
+
 # ============================================================================
 # Sandbox
 # ============================================================================
@@ -361,6 +378,7 @@ def build_bwrap_args(group: dict) -> list[str]:
         "--ro-bind", "/bin", "/bin",
         "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf",
         "--ro-bind", "/etc/ssl", "/etc/ssl",
+        "--ro-bind", "/etc/pki", "/etc/pki",  # Fedora CA certs
         "--symlink", "/usr/bin", "/sbin",
         "--proc", "/proc",
         "--dev", "/dev",
@@ -370,14 +388,25 @@ def build_bwrap_args(group: dict) -> list[str]:
     ]
 
     home = Path.home()
-    claude_config = home / ".claude"
     claude_bin = home / ".local" / "bin"
     claude_share = home / ".local" / "share" / "claude"
+    user_claude_creds = home / ".claude" / ".credentials.json"
+
+    # Hermit has its own .claude directory (not user's)
+    hermit_claude = HERMIT_DIR / ".claude"
+    hermit_claude.mkdir(parents=True, exist_ok=True)
+
+    # Copy user's credentials if hermit doesn't have its own yet
+    hermit_creds = hermit_claude / ".credentials.json"
+    if user_claude_creds.exists() and not hermit_creds.exists():
+        import shutil
+        shutil.copy2(user_claude_creds, hermit_creds)
 
     args.extend(["--dir", str(home)])
 
-    if claude_config.exists():
-        args.extend(["--bind", str(claude_config), str(claude_config)])
+    # Mount hermit's .claude as ~/.claude (isolated from user's plugins/settings)
+    if hermit_claude.exists():
+        args.extend(["--bind", str(hermit_claude), str(home / ".claude")])
     if claude_bin.exists():
         args.extend(["--dir", str(home / ".local")])
         args.extend(["--ro-bind", str(claude_bin), str(claude_bin)])
@@ -387,12 +416,6 @@ def build_bwrap_args(group: dict) -> list[str]:
     # Mount hermit tools directory
     if TOOLS_DIR.exists():
         args.extend(["--ro-bind", str(TOOLS_DIR), str(TOOLS_DIR)])
-
-    # Mount hermit's own config directory as ~/.config (for gh auth, etc.)
-    hermit_gh_config = CONFIG_DIR / "gh"
-    if hermit_gh_config.exists():
-        args.extend(["--dir", str(home / ".config")])
-        args.extend(["--bind", str(hermit_gh_config), str(home / ".config" / "gh")])
 
     # Build PATH with available tools
     path_parts = [str(claude_bin), "/usr/bin", "/bin"]
@@ -408,6 +431,11 @@ def build_bwrap_args(group: dict) -> list[str]:
         "--share-net",
         "--die-with-parent",
     ])
+
+    # Pass GH_TOKEN from hermit's config (don't mount config files)
+    gh_token = get_gh_token()
+    if gh_token:
+        args.extend(["--setenv", "GH_TOKEN", gh_token])
 
     return args
 
