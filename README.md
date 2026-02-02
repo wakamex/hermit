@@ -91,3 +91,62 @@ EOF
 systemctl --user enable hermit
 systemctl --user start hermit
 ```
+
+## Scheduled Tasks
+
+```bash
+# Recurring tasks
+hermit task add -c @hourly "Check for updates"
+hermit task add -c @daily "Morning summary"
+hermit task add -c */5 "Run every 5 minutes"
+
+# One-time tasks
+hermit task add -c "once:+30m" "Remind me in 30 minutes"
+hermit task add -c "once:2026-02-02T09:00:00" "Morning meeting prep"
+
+# Manage
+hermit task list
+hermit task rm <id>
+```
+
+## History
+
+All messages are logged to `groups/<name>/history.txt` for easy viewing:
+
+```bash
+tail -f groups/default/history.txt
+```
+
+## Background
+
+Hermit is a Linux-native, security-focused alternative to projects like Clawdbot/OpenClaw.
+
+### Related Projects
+
+| Project | Security | Platform | Input |
+|---------|----------|----------|-------|
+| [Clawdbot/OpenClaw](https://github.com/VoltAgent/awesome-clawdbot-skills) | None (full system access) | Multi-platform | WhatsApp, Telegram, Slack, etc. |
+| [NanoClaw](https://github.com/anthropics/nanoclaw) | Apple Containers | macOS | WhatsApp |
+| **Hermit** | bwrap sandbox | Linux | CLI |
+
+### Why Hermit?
+
+1. **Security** - Claude runs in a bwrap sandbox, isolated to `groups/<name>/`. No access to your home directory, system files, or other groups.
+
+2. **Linux-native** - Uses bubblewrap (same tech as Flatpak) instead of Docker or Apple Containers.
+
+3. **Minimal** - Single Python file, stdlib only, ~800 lines. No Node.js, no web frameworks.
+
+4. **CLI-first** - No messaging app integration. Just `hermit send "prompt"`.
+
+### Security Model
+
+```
+Host System (protected)
+└── bwrap sandbox
+    ├── /usr, /lib, /bin (read-only)
+    ├── ~/.claude (read-write, for auth)
+    └── /workspace → groups/<name>/ (read-write)
+```
+
+Claude can only write to the group workspace. Prompt injection attacks are contained - a malicious prompt can't access files outside the sandbox or exfiltrate data from other groups.
