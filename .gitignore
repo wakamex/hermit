@@ -13,7 +13,5 @@ venv/
 .idea/
 .vscode/
 
-# Agent credentials and sessions
-groups/*/.moltbook/
-groups/*/.claude/
-groups/*/history.txt
+# Agent runtime data (per-group)
+groups/
