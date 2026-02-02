@@ -99,17 +99,30 @@ def build_bwrap_args(group: dict, env_vars: dict) -> list[str]:
         "--tmpfs", "/tmp",
         # Workspace - group folder is read-write
         "--bind", str(group_path), "/workspace",
-        # Home directory for Claude
+        # Home directory - mount at original path to preserve hardcoded paths in Claude
         "--tmpfs", "/home",
-        "--dir", "/home/user",
-        "--setenv", "HOME", "/home/user",
-        "--setenv", "USER", "user",
     ]
 
-    # Mount Claude auth if it exists (for Claude Max subscription)
-    claude_auth = Path.home() / ".claude"
-    if claude_auth.exists():
-        args.extend(["--ro-bind", str(claude_auth), "/home/user/.claude"])
+    # Mount Claude installation at its original path (scripts have hardcoded paths)
+    home = Path.home()
+    claude_dir = home / ".claude"
+    if claude_dir.exists():
+        # Create parent dirs and mount at original location
+        args.extend([
+            "--dir", str(home),
+            "--ro-bind", str(claude_dir), str(claude_dir),
+        ])
+        args.extend([
+            "--setenv", "HOME", str(home),
+            "--setenv", "USER", home.name,
+            "--setenv", "PATH", f"{claude_dir}/local:{os.environ.get('PATH', '/usr/bin:/bin')}",
+        ])
+    else:
+        args.extend([
+            "--dir", "/home/user",
+            "--setenv", "HOME", "/home/user",
+            "--setenv", "USER", "user",
+        ])
 
     # Working directory
     args.extend([
@@ -287,13 +300,15 @@ def main():
         # Test bwrap with simple commands
         group = get_or_create_group(args.group)
         bwrap_args = build_bwrap_args(group, {})
+        claude_dir = Path.home() / ".claude"
 
         print("Testing sandbox...")
 
         tests = [
             (["echo", "hello from sandbox"], "echo test"),
             (["ls", "/workspace"], "workspace mount"),
-            (["ls", "/home/user/.claude"], "claude auth mount"),
+            (["ls", str(claude_dir)], "claude auth mount"),
+            (["which", "claude"], "claude in PATH"),
             (["touch", "/workspace/test.txt"], "workspace write"),
             (["rm", "/workspace/test.txt"], "workspace cleanup"),
         ]
