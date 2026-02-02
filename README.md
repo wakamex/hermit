@@ -6,66 +6,88 @@ Personal Claude assistant with bwrap sandboxing for Linux.
 
 - Python 3.10+
 - bubblewrap (`bwrap`)
-- Claude Code CLI
-
-Install bwrap:
-```bash
-# Fedora
-sudo dnf install bubblewrap
-
-# Ubuntu/Debian
-sudo apt install bubblewrap
-
-# Arch
-sudo pacman -S bubblewrap
-```
-
-## Setup
+- Claude Code CLI (native binary)
 
 ```bash
-# Set your API key
-export ANTHROPIC_API_KEY="sk-..."
+# Install bwrap
+sudo dnf install bubblewrap  # Fedora
+sudo apt install bubblewrap  # Debian/Ubuntu
 
-# Or use OAuth token
-export CLAUDE_CODE_OAUTH_TOKEN="..."
-
-# Initialize database
-python hermit.py --init
-
-# Start chatting
-python hermit.py
+# Install Claude Code native binary
+claude install stable
 ```
 
 ## Usage
 
 ```bash
-# Interactive REPL (default group)
-python hermit.py
+# Start the daemon (in a terminal or via systemd)
+python hermit.py daemon
 
-# Interactive REPL with specific group
-python hermit.py -g myproject
+# In another terminal:
+python hermit.py send "What is 2+2?"
+python hermit.py send -g myproject "Summarize the codebase"
 
-# Single prompt
-python hermit.py -p "What is 2+2?"
+# Interactive REPL
+python hermit.py repl
+python hermit.py repl -g myproject
 
-# Single prompt with group
-python hermit.py -g myproject -p "Summarize the codebase"
+# Manage sessions
+python hermit.py groups          # List groups and session status
+python hermit.py new -g myproject  # Clear session, start fresh
+python hermit.py status          # Check if daemon is running
+```
+
+## Architecture
+
+```
+hermit daemon          CLI client
+     │                     │
+     └──── Unix socket ────┘
+              │
+         ┌────┴────┐
+         │ SQLite  │  (groups, sessions)
+         └────┬────┘
+              │
+         ┌────┴────┐
+         │  bwrap  │  (sandbox)
+         └────┬────┘
+              │
+         ┌────┴────┐
+         │ Claude  │  (AI)
+         └─────────┘
 ```
 
 ## Groups
 
 Each group gets:
-- Isolated filesystem at `groups/<name>/`
-- Separate conversation history
+- Isolated workspace at `groups/<name>/`
+- Persistent session (multi-turn conversations)
 - Own `CLAUDE.md` memory file
 
-## Architecture
+## Session Continuity
 
-```
-hermit.py          # Single-file implementation
-├── SQLite DB      # Groups, sessions, messages
-├── bwrap          # Linux namespace isolation
-└── Claude Code    # AI agent
-```
+The daemon tracks Claude session IDs per group. Subsequent messages in the same group continue the conversation context.
 
-No daemon. No web tech. Just Python + bwrap + Claude.
+Use `hermit new -g GROUP` to clear a session and start fresh.
+
+## Systemd Service
+
+```bash
+# Create user service
+mkdir -p ~/.config/systemd/user
+cat > ~/.config/systemd/user/hermit.service << 'EOF'
+[Unit]
+Description=Hermit Claude Assistant
+
+[Service]
+ExecStart=/usr/bin/python3 /path/to/hermit/hermit.py daemon
+Restart=always
+
+[Install]
+WantedBy=default.target
+EOF
+
+# Enable and start
+systemctl --user enable hermit
+systemctl --user start hermit
+```

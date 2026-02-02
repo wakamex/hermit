@@ -2,32 +2,45 @@
 
 Personal Claude assistant with bwrap sandboxing for Linux.
 
-## Structure
+## Architecture
 
-Single Python file (`hermit.py`) that:
-1. Manages groups via SQLite
-2. Spawns Claude Code in bwrap sandbox
-3. Routes input/output
+Daemon + CLI client pattern:
+- Daemon listens on Unix socket (`data/hermit.sock`)
+- CLI sends JSON commands to daemon
+- Daemon manages sessions, runs Claude in bwrap sandbox
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `daemon` | Start the daemon |
+| `send [-g GROUP] MSG` | Send message |
+| `repl [-g GROUP]` | Interactive REPL |
+| `groups` | List groups |
+| `new [-g GROUP]` | Clear session |
+| `status` | Check daemon |
 
 ## Key Functions
 
 | Function | Purpose |
 |----------|---------|
-| `init_db()` | Create SQLite tables |
-| `get_or_create_group()` | Group management |
-| `build_bwrap_args()` | Construct bwrap command |
-| `run_sandbox()` | Execute Claude in sandbox |
-| `chat()` | High-level send message |
-| `repl()` | Interactive mode |
+| `Daemon.run()` | Main loop, accepts connections |
+| `Daemon.handle_request()` | Route commands |
+| `run_sandbox()` | Execute Claude in bwrap |
+| `build_bwrap_args()` | Construct sandbox command |
+| `send_to_daemon()` | Client → daemon communication |
+
+## Session Continuity
+
+Sessions tracked in SQLite per group. Uses Claude's `--resume SESSION_ID` flag.
 
 ## Development
 
 ```bash
-python hermit.py --init    # Initialize DB
-python hermit.py           # Interactive REPL
-python hermit.py -p "..."  # Single prompt
+# Terminal 1: Start daemon
+python hermit.py daemon
+
+# Terminal 2: Send messages
+python hermit.py send "hello"
+python hermit.py repl
 ```
-
-## Adding Features
-
-To add input channels (HTTP, Unix socket, etc.), add a new function that calls `chat(group, prompt)` and returns the response.

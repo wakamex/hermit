@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
 """
 Hermit - Personal Claude assistant with bwrap sandboxing
+
+Usage:
+    hermit daemon              Start the daemon
+    hermit send -g GROUP MSG   Send message to group
+    hermit groups              List groups
+    hermit status              Check daemon status
 """
 
 import argparse
 import json
 import os
+import socket
 import sqlite3
 import subprocess
 import sys
-from datetime import datetime
+import threading
 from pathlib import Path
 
 # Paths
@@ -17,7 +24,12 @@ BASE_DIR = Path(__file__).parent.resolve()
 GROUPS_DIR = BASE_DIR / "groups"
 DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "hermit.db"
+SOCKET_PATH = DATA_DIR / "hermit.sock"
+PID_FILE = DATA_DIR / "hermit.pid"
 
+# ============================================================================
+# Database
+# ============================================================================
 
 def init_db():
     """Initialize SQLite database."""
@@ -28,15 +40,8 @@ def init_db():
             id INTEGER PRIMARY KEY,
             name TEXT UNIQUE NOT NULL,
             folder TEXT UNIQUE NOT NULL,
+            session_id TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE TABLE IF NOT EXISTS sessions (
-            id INTEGER PRIMARY KEY,
-            group_id INTEGER NOT NULL,
-            session_id TEXT NOT NULL,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (group_id) REFERENCES groups(id)
         );
 
         CREATE TABLE IF NOT EXISTS messages (
@@ -51,14 +56,20 @@ def init_db():
     conn.close()
 
 
+def get_db():
+    """Get database connection."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 def get_or_create_group(name: str) -> dict:
     """Get or create a group by name."""
     folder = name.lower().replace(" ", "-")
     group_path = GROUPS_DIR / folder
     group_path.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    conn = get_db()
     cur = conn.cursor()
 
     cur.execute("SELECT * FROM groups WHERE name = ?", (name,))
@@ -72,116 +83,98 @@ def get_or_create_group(name: str) -> dict:
             (name, folder)
         )
         conn.commit()
-        group = {"id": cur.lastrowid, "name": name, "folder": folder}
+        group = {"id": cur.lastrowid, "name": name, "folder": folder, "session_id": None}
 
     conn.close()
     return group
 
 
-def build_bwrap_args(group: dict, env_vars: dict) -> list[str]:
+def update_session(group_name: str, session_id: str):
+    """Update the session ID for a group."""
+    conn = get_db()
+    conn.execute("UPDATE groups SET session_id = ? WHERE name = ?", (session_id, group_name))
+    conn.commit()
+    conn.close()
+
+
+def list_groups() -> list[dict]:
+    """List all groups."""
+    conn = get_db()
+    rows = conn.execute("SELECT name, folder, session_id, created_at FROM groups ORDER BY name").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ============================================================================
+# Sandbox
+# ============================================================================
+
+def build_bwrap_args(group: dict) -> list[str]:
     """Build bwrap command arguments."""
     group_path = GROUPS_DIR / group["folder"]
 
     args = [
         "bwrap",
-        # Mount system directories read-only
         "--ro-bind", "/usr", "/usr",
         "--ro-bind", "/lib", "/lib",
         "--ro-bind", "/lib64", "/lib64",
         "--ro-bind", "/bin", "/bin",
         "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf",
         "--ro-bind", "/etc/ssl", "/etc/ssl",
-        # Symlink for /sbin if it exists
         "--symlink", "/usr/bin", "/sbin",
-        # Basic filesystems
         "--proc", "/proc",
         "--dev", "/dev",
         "--tmpfs", "/tmp",
-        # Workspace - group folder is read-write
         "--bind", str(group_path), "/workspace",
-        # Home directory - mount at original path to preserve hardcoded paths in Claude
         "--tmpfs", "/home",
     ]
 
-    # Mount Claude native binary and config
     home = Path.home()
-    claude_config = home / ".claude"  # Auth and config
-    claude_bin = home / ".local" / "bin"  # Symlink to binary
-    claude_share = home / ".local" / "share" / "claude"  # Actual binary
+    claude_config = home / ".claude"
+    claude_bin = home / ".local" / "bin"
+    claude_share = home / ".local" / "share" / "claude"
 
     args.extend(["--dir", str(home)])
 
-    # Mount Claude directories that exist
-    # Note: .claude needs write access for sessions/cache
     if claude_config.exists():
         args.extend(["--bind", str(claude_config), str(claude_config)])
     if claude_bin.exists():
-        args.extend([
-            "--dir", str(home / ".local"),
-            "--ro-bind", str(claude_bin), str(claude_bin),
-        ])
+        args.extend(["--dir", str(home / ".local")])
+        args.extend(["--ro-bind", str(claude_bin), str(claude_bin)])
     if claude_share.exists():
         args.extend(["--ro-bind", str(claude_share), str(claude_share)])
 
-    # Environment
     args.extend([
         "--setenv", "HOME", str(home),
         "--setenv", "USER", home.name,
         "--setenv", "PATH", f"{claude_bin}:/usr/bin:/bin",
-    ])
-
-    # Working directory
-    args.extend([
         "--chdir", "/workspace",
-        # Isolation
         "--unshare-all",
-        "--share-net",  # Allow network for Claude API calls
+        "--share-net",
         "--die-with-parent",
     ])
-
-    # Add environment variables
-    for key, value in env_vars.items():
-        args.extend(["--setenv", key, value])
 
     return args
 
 
-def run_sandbox(group: dict, prompt: str) -> dict:
+def run_sandbox(group: dict, prompt: str, session_id: str | None = None) -> dict:
     """Run Claude Code in bwrap sandbox."""
-    # Environment variables for Claude
-    env_vars = {}
+    bwrap_args = build_bwrap_args(group)
 
-    # Check for API key or OAuth token (only needed if ~/.claude auth doesn't exist)
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
-    claude_auth_exists = (Path.home() / ".claude").exists()
+    cmd = bwrap_args + ["claude", "-p", "--output-format", "json"]
 
-    if oauth_token:
-        env_vars["CLAUDE_CODE_OAUTH_TOKEN"] = oauth_token
-    elif api_key:
-        env_vars["ANTHROPIC_API_KEY"] = api_key
-    elif not claude_auth_exists:
-        return {
-            "status": "error",
-            "error": "No ~/.claude auth, ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN found"
-        }
+    # Continue existing session if we have one
+    if session_id:
+        cmd.extend(["--resume", session_id])
 
-    bwrap_args = build_bwrap_args(group, env_vars)
-
-    # Add Claude Code command
-    cmd = bwrap_args + [
-        "claude",
-        "--print",  # Print response and exit
-        "--output-format", "json",
-        prompt
-    ]
+    cmd.append(prompt)
 
     try:
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            timeout=300  # 5 minute timeout
+            timeout=300
         )
 
         if result.returncode != 0:
@@ -190,14 +183,14 @@ def run_sandbox(group: dict, prompt: str) -> dict:
                 "error": f"Claude exited with code {result.returncode}: {result.stderr[-500:]}"
             }
 
-        # Parse JSON output
         try:
             output = json.loads(result.stdout)
-            # Extract just the text result
-            text = output.get("result", result.stdout)
-            return {"status": "success", "result": text, "session_id": output.get("session_id")}
+            return {
+                "status": "success",
+                "result": output.get("result", result.stdout),
+                "session_id": output.get("session_id")
+            }
         except json.JSONDecodeError:
-            # If not JSON, return raw output
             return {"status": "success", "result": result.stdout}
 
     except subprocess.TimeoutExpired:
@@ -206,40 +199,217 @@ def run_sandbox(group: dict, prompt: str) -> dict:
         return {"status": "error", "error": f"Command not found: {e}"}
 
 
-def build_command(group_name: str, prompt: str) -> list[str]:
-    """Build the full command without running it (for dry-run)."""
-    group = get_or_create_group(group_name)
-    env_vars = {}
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
-    if oauth_token:
-        env_vars["CLAUDE_CODE_OAUTH_TOKEN"] = oauth_token
-    elif api_key:
-        env_vars["ANTHROPIC_API_KEY"] = api_key
+# ============================================================================
+# Daemon
+# ============================================================================
 
-    bwrap_args = build_bwrap_args(group, env_vars)
-    return bwrap_args + ["claude", "-p", "--output-format", "json", prompt]
+class Daemon:
+    """Hermit daemon - manages sessions and handles requests."""
+
+    def __init__(self):
+        self.running = False
+
+    def handle_request(self, data: dict) -> dict:
+        """Handle a request from a client."""
+        cmd = data.get("cmd")
+
+        if cmd == "ping":
+            return {"status": "ok", "message": "pong"}
+
+        elif cmd == "send":
+            group_name = data.get("group", "default")
+            prompt = data.get("prompt", "")
+
+            if not prompt:
+                return {"status": "error", "error": "No prompt provided"}
+
+            group = get_or_create_group(group_name)
+            result = run_sandbox(group, prompt, group.get("session_id"))
+
+            # Save session for continuity
+            if result.get("session_id"):
+                update_session(group_name, result["session_id"])
+
+            return result
+
+        elif cmd == "groups":
+            return {"status": "ok", "groups": list_groups()}
+
+        elif cmd == "new_session":
+            group_name = data.get("group", "default")
+            update_session(group_name, None)
+            return {"status": "ok", "message": f"Session cleared for {group_name}"}
+
+        else:
+            return {"status": "error", "error": f"Unknown command: {cmd}"}
+
+    def handle_client(self, conn: socket.socket):
+        """Handle a single client connection."""
+        try:
+            data = b""
+            while True:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+                if b"\n" in data:
+                    break
+
+            if data:
+                request = json.loads(data.decode())
+                response = self.handle_request(request)
+                conn.sendall(json.dumps(response).encode() + b"\n")
+        except Exception as e:
+            try:
+                conn.sendall(json.dumps({"status": "error", "error": str(e)}).encode() + b"\n")
+            except:
+                pass
+        finally:
+            conn.close()
+
+    def run(self):
+        """Run the daemon."""
+        init_db()
+
+        # Remove stale socket
+        if SOCKET_PATH.exists():
+            SOCKET_PATH.unlink()
+
+        # Write PID file
+        PID_FILE.write_text(str(os.getpid()))
+
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.bind(str(SOCKET_PATH))
+        sock.listen(5)
+
+        print(f"Hermit daemon listening on {SOCKET_PATH}")
+        self.running = True
+
+        try:
+            while self.running:
+                conn, _ = sock.accept()
+                thread = threading.Thread(target=self.handle_client, args=(conn,))
+                thread.daemon = True
+                thread.start()
+        except KeyboardInterrupt:
+            print("\nShutting down...")
+        finally:
+            sock.close()
+            SOCKET_PATH.unlink(missing_ok=True)
+            PID_FILE.unlink(missing_ok=True)
 
 
-def chat(group_name: str, prompt: str) -> str:
-    """Send a message to Claude in the specified group."""
-    group = get_or_create_group(group_name)
+# ============================================================================
+# Client
+# ============================================================================
 
-    print(f"[hermit] Group: {group['name']}", file=sys.stderr)
-    print(f"[hermit] Prompt: {prompt[:100]}...", file=sys.stderr)
+def send_to_daemon(request: dict) -> dict:
+    """Send a request to the daemon."""
+    if not SOCKET_PATH.exists():
+        return {"status": "error", "error": "Daemon not running. Start with: hermit daemon"}
 
-    result = run_sandbox(group, prompt)
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.connect(str(SOCKET_PATH))
+        sock.sendall(json.dumps(request).encode() + b"\n")
 
-    if result["status"] == "error":
-        return f"Error: {result['error']}"
+        data = b""
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+            if b"\n" in data:
+                break
 
-    return result["result"]
+        return json.loads(data.decode())
+    finally:
+        sock.close()
 
 
-def repl(group_name: str):
-    """Interactive REPL mode."""
-    group = get_or_create_group(group_name)
-    print(f"Hermit - chatting in group '{group['name']}'")
+# ============================================================================
+# CLI
+# ============================================================================
+
+def cmd_daemon(args):
+    """Start the daemon."""
+    if SOCKET_PATH.exists():
+        print("Daemon may already be running. Remove socket to force start:")
+        print(f"  rm {SOCKET_PATH}")
+        sys.exit(1)
+
+    daemon = Daemon()
+    daemon.run()
+
+
+def cmd_send(args):
+    """Send a message."""
+    prompt = " ".join(args.prompt) if args.prompt else None
+
+    if not prompt:
+        print("Error: No prompt provided", file=sys.stderr)
+        sys.exit(1)
+
+    response = send_to_daemon({
+        "cmd": "send",
+        "group": args.group,
+        "prompt": prompt
+    })
+
+    if response.get("status") == "error":
+        print(f"Error: {response.get('error')}", file=sys.stderr)
+        sys.exit(1)
+
+    print(response.get("result", ""))
+
+
+def cmd_groups(args):
+    """List groups."""
+    response = send_to_daemon({"cmd": "groups"})
+
+    if response.get("status") == "error":
+        print(f"Error: {response.get('error')}", file=sys.stderr)
+        sys.exit(1)
+
+    groups = response.get("groups", [])
+    if not groups:
+        print("No groups yet.")
+        return
+
+    for g in groups:
+        session = "active" if g.get("session_id") else "none"
+        print(f"  {g['name']}: session={session}")
+
+
+def cmd_status(args):
+    """Check daemon status."""
+    response = send_to_daemon({"cmd": "ping"})
+
+    if response.get("status") == "error":
+        print(f"Daemon: not running")
+        print(f"  Start with: hermit daemon")
+        sys.exit(1)
+
+    print("Daemon: running")
+
+
+def cmd_new(args):
+    """Start a new session (clear existing)."""
+    response = send_to_daemon({
+        "cmd": "new_session",
+        "group": args.group
+    })
+
+    if response.get("status") == "error":
+        print(f"Error: {response.get('error')}", file=sys.stderr)
+        sys.exit(1)
+
+    print(response.get("message"))
+
+
+def cmd_repl(args):
+    """Interactive REPL via daemon."""
+    print(f"Hermit - chatting in group '{args.group}'")
     print("Type 'exit' or Ctrl+D to quit\n")
 
     while True:
@@ -249,9 +419,21 @@ def repl(group_name: str):
                 continue
             if prompt.lower() == "exit":
                 break
+            if prompt.lower() == "/new":
+                send_to_daemon({"cmd": "new_session", "group": args.group})
+                print("Session cleared.\n")
+                continue
 
-            response = chat(group_name, prompt)
-            print(f"\n{response}\n")
+            response = send_to_daemon({
+                "cmd": "send",
+                "group": args.group,
+                "prompt": prompt
+            })
+
+            if response.get("status") == "error":
+                print(f"Error: {response.get('error')}\n")
+            else:
+                print(f"\n{response.get('result', '')}\n")
 
         except (EOFError, KeyboardInterrupt):
             print("\nGoodbye!")
@@ -262,81 +444,47 @@ def main():
     parser = argparse.ArgumentParser(
         description="Hermit - Personal Claude assistant with bwrap sandboxing"
     )
-    parser.add_argument(
-        "-g", "--group",
-        default="default",
-        help="Group name for conversation isolation (default: 'default')"
-    )
-    parser.add_argument(
-        "-p", "--prompt",
-        help="Single prompt to send (non-interactive)"
-    )
-    parser.add_argument(
-        "--init",
-        action="store_true",
-        help="Initialize database and exit"
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Print the command that would be run without executing"
-    )
-    parser.add_argument(
-        "--test-sandbox",
-        action="store_true",
-        help="Test bwrap sandbox with a simple command (no Claude)"
-    )
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
+
+    # daemon
+    p_daemon = subparsers.add_parser("daemon", help="Start the daemon")
+    p_daemon.set_defaults(func=cmd_daemon)
+
+    # send
+    p_send = subparsers.add_parser("send", help="Send a message")
+    p_send.add_argument("-g", "--group", default="default", help="Group name")
+    p_send.add_argument("prompt", nargs="*", help="Message to send")
+    p_send.set_defaults(func=cmd_send)
+
+    # groups
+    p_groups = subparsers.add_parser("groups", help="List groups")
+    p_groups.set_defaults(func=cmd_groups)
+
+    # status
+    p_status = subparsers.add_parser("status", help="Check daemon status")
+    p_status.set_defaults(func=cmd_status)
+
+    # new
+    p_new = subparsers.add_parser("new", help="Start new session (clear existing)")
+    p_new.add_argument("-g", "--group", default="default", help="Group name")
+    p_new.set_defaults(func=cmd_new)
+
+    # repl
+    p_repl = subparsers.add_parser("repl", help="Interactive REPL")
+    p_repl.add_argument("-g", "--group", default="default", help="Group name")
+    p_repl.set_defaults(func=cmd_repl)
+
+    # init (standalone, no daemon)
+    p_init = subparsers.add_parser("init", help="Initialize database")
+    p_init.set_defaults(func=lambda a: (init_db(), print(f"Database initialized at {DB_PATH}")))
 
     args = parser.parse_args()
 
-    # Always ensure DB exists
-    init_db()
+    if args.command is None:
+        parser.print_help()
+        sys.exit(1)
 
-    if args.init:
-        print(f"Database initialized at {DB_PATH}")
-        return
-
-    if args.dry_run:
-        # Show command without running
-        prompt = args.prompt or "PROMPT_HERE"
-        cmd = build_command(args.group, prompt)
-        print("Command that would be executed:\n")
-        print(" \\\n  ".join(cmd))
-        return
-
-    if args.test_sandbox:
-        # Test bwrap with simple commands
-        group = get_or_create_group(args.group)
-        bwrap_args = build_bwrap_args(group, {})
-        claude_dir = Path.home() / ".claude"
-
-        print("Testing sandbox...")
-
-        tests = [
-            (["echo", "hello from sandbox"], "echo test"),
-            (["ls", "/workspace"], "workspace mount"),
-            (["ls", str(claude_dir)], "claude auth mount"),
-            (["which", "claude"], "claude in PATH"),
-            (["touch", "/workspace/test.txt"], "workspace write"),
-            (["rm", "/workspace/test.txt"], "workspace cleanup"),
-        ]
-
-        for cmd_suffix, name in tests:
-            cmd = bwrap_args + cmd_suffix
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            status = "OK" if result.returncode == 0 else f"FAIL: {result.stderr.strip()}"
-            print(f"  {name}: {status}")
-
-        print("\nSandbox test complete.")
-        return
-
-    if args.prompt:
-        # Single prompt mode
-        response = chat(args.group, args.prompt)
-        print(response)
-    else:
-        # Interactive REPL
-        repl(args.group)
+    args.func(args)
 
 
 if __name__ == "__main__":
