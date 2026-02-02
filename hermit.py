@@ -103,26 +103,31 @@ def build_bwrap_args(group: dict, env_vars: dict) -> list[str]:
         "--tmpfs", "/home",
     ]
 
-    # Mount Claude installation at its original path (scripts have hardcoded paths)
+    # Mount Claude native binary and config
     home = Path.home()
-    claude_dir = home / ".claude"
-    if claude_dir.exists():
-        # Create parent dirs and mount at original location
+    claude_config = home / ".claude"  # Auth and config
+    claude_bin = home / ".local" / "bin"  # Symlink to binary
+    claude_share = home / ".local" / "share" / "claude"  # Actual binary
+
+    args.extend(["--dir", str(home)])
+
+    # Mount Claude directories that exist
+    if claude_config.exists():
+        args.extend(["--ro-bind", str(claude_config), str(claude_config)])
+    if claude_bin.exists():
         args.extend([
-            "--dir", str(home),
-            "--ro-bind", str(claude_dir), str(claude_dir),
+            "--dir", str(home / ".local"),
+            "--ro-bind", str(claude_bin), str(claude_bin),
         ])
-        args.extend([
-            "--setenv", "HOME", str(home),
-            "--setenv", "USER", home.name,
-            "--setenv", "PATH", f"{claude_dir}/local:{os.environ.get('PATH', '/usr/bin:/bin')}",
-        ])
-    else:
-        args.extend([
-            "--dir", "/home/user",
-            "--setenv", "HOME", "/home/user",
-            "--setenv", "USER", "user",
-        ])
+    if claude_share.exists():
+        args.extend(["--ro-bind", str(claude_share), str(claude_share)])
+
+    # Environment
+    args.extend([
+        "--setenv", "HOME", str(home),
+        "--setenv", "USER", home.name,
+        "--setenv", "PATH", f"{claude_bin}:/usr/bin:/bin",
+    ])
 
     # Working directory
     args.extend([
