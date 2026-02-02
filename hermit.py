@@ -571,7 +571,11 @@ def calculate_usage() -> dict:
                             model = "haiku" if "haiku" in model_id else "sonnet" if "sonnet" in model_id else "opus"
                             rates = CREDIT_RATES[model]
 
-                            input_tokens = usage.get("input_tokens", 0) + usage.get("cache_creation_input_tokens", 0)
+                            # On subscriptions: cache_read is FREE, cache_creation counts at ~0.1x
+                            # (empirically derived to match Claude's API response)
+                            input_tokens = usage.get("input_tokens", 0)
+                            cache_creation = usage.get("cache_creation_input_tokens", 0)
+                            input_tokens += int(cache_creation * 0.1)
                             output_tokens = usage.get("output_tokens", 0)
                             credits = int(input_tokens * rates["input"] + output_tokens * rates["output"] + 0.999)
 
