@@ -326,7 +326,7 @@ def run_sandbox(group: dict, prompt: str, session_id: str | None = None) -> dict
     """Run Claude Code in bwrap sandbox."""
     bwrap_args = build_bwrap_args(group)
 
-    cmd = bwrap_args + ["claude", "-p", "--output-format", "json"]
+    cmd = bwrap_args + ["claude", "-p", "--output-format", "json", "--dangerously-skip-permissions"]
 
     if session_id:
         cmd.extend(["--resume", session_id])
