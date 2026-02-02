@@ -22,7 +22,7 @@ import sys
 import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 # Paths
@@ -482,6 +482,124 @@ def run_sandbox(group: dict, prompt: str, session_id: str | None = None) -> dict
 
 
 # ============================================================================
+# Usage Limits
+# ============================================================================
+
+CLAUDE_DIR = Path.home() / ".claude"
+HERMIT_CLAUDE_DIR = HERMIT_DIR / ".claude"
+USAGE_SESSION_DIRS = [CLAUDE_DIR / "projects", HERMIT_CLAUDE_DIR / "projects"]
+CREDENTIALS_FILE = CLAUDE_DIR / ".credentials.json"
+
+# Credit rates and plan limits from https://she-llac.com/claude-limits
+CREDIT_RATES = {
+    "opus": {"input": 10/15, "output": 50/15},
+    "sonnet": {"input": 6/15, "output": 30/15},
+    "haiku": {"input": 2/15, "output": 10/15},
+}
+
+PLAN_LIMITS = {
+    "pro": {"5h": 550_000, "7d": 5_000_000},
+    "max5x": {"5h": 3_300_000, "7d": 41_666_700},
+    "max20x": {"5h": 11_000_000, "7d": 83_333_300},
+}
+
+def get_plan() -> str:
+    """Auto-detect plan from credentials."""
+    try:
+        creds = json.loads(CREDENTIALS_FILE.read_text())
+        tier = creds.get("claudeAiOauth", {}).get("rateLimitTier", "")
+        if "max_20x" in tier or "max20x" in tier:
+            return "max20x"
+        elif "max_5x" in tier or "max5x" in tier:
+            return "max5x"
+    except:
+        pass
+    return "pro"
+
+
+def calculate_usage() -> dict:
+    """Calculate usage from all session logs."""
+    now = datetime.now(timezone.utc)
+    five_hours_ago = now - timedelta(hours=5)
+    seven_days_ago = now - timedelta(days=7)
+
+    credits_5h = 0
+    credits_7d = 0
+
+    for session_dir in USAGE_SESSION_DIRS:
+        if not session_dir.exists():
+            continue
+        for session_file in session_dir.glob("**/*.jsonl"):
+            # Skip files older than 7 days
+            try:
+                mtime = datetime.fromtimestamp(session_file.stat().st_mtime, tz=timezone.utc)
+                if mtime < seven_days_ago:
+                    continue
+            except:
+                continue
+
+            try:
+                with open(session_file, 'r') as f:
+                    for line in f:
+                        try:
+                            entry = json.loads(line)
+                            if entry.get("type") != "assistant":
+                                continue
+
+                            ts = entry.get("timestamp")
+                            if not ts:
+                                continue
+
+                            try:
+                                timestamp = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                            except:
+                                continue
+
+                            if timestamp < seven_days_ago:
+                                continue
+
+                            msg = entry.get("message", {})
+                            usage = msg.get("usage", {})
+                            model_id = (msg.get("model") or "").lower()
+                            model = "haiku" if "haiku" in model_id else "sonnet" if "sonnet" in model_id else "opus"
+                            rates = CREDIT_RATES[model]
+
+                            input_tokens = usage.get("input_tokens", 0) + usage.get("cache_creation_input_tokens", 0)
+                            output_tokens = usage.get("output_tokens", 0)
+                            credits = int(input_tokens * rates["input"] + output_tokens * rates["output"] + 0.999)
+
+                            credits_7d += credits
+                            if timestamp >= five_hours_ago:
+                                credits_5h += credits
+
+                        except:
+                            continue
+            except:
+                continue
+
+    plan = get_plan()
+    limits = PLAN_LIMITS.get(plan, PLAN_LIMITS["pro"])
+
+    return {
+        "plan": plan,
+        "5h": {"used": credits_5h, "limit": limits["5h"], "pct": min(100, credits_5h / limits["5h"] * 100)},
+        "7d": {"used": credits_7d, "limit": limits["7d"], "pct": min(100, credits_7d / limits["7d"] * 100)},
+        "updated_at": now.isoformat(),
+    }
+
+
+def update_usage_file(group_folder: str):
+    """Write usage limits to group workspace and central location."""
+    usage = calculate_usage()
+    # Write to group workspace (for Hermit to read)
+    usage_file = GROUPS_DIR / group_folder / ".usage-limits.json"
+    usage_file.write_text(json.dumps(usage, indent=2))
+    # Write to central location (for statusline to read)
+    central_file = CLAUDE_DIR / "usage-limits.json"
+    central_file.write_text(json.dumps(usage, indent=2))
+
+
+# ============================================================================
 # Daemon
 # ============================================================================
 
@@ -531,6 +649,7 @@ class Daemon:
                         update_session(task["group_name"], result["session_id"])
 
                     update_task_after_run(task["id"], result_text, task["cron"])
+                    update_usage_file(group["folder"])
                     print(f"Task {task['id']} completed")
             except Exception as e:
                 print(f"Scheduler error: {e}")
@@ -561,6 +680,9 @@ class Daemon:
 
             if result.get("session_id"):
                 update_session(group_name, result["session_id"])
+
+            # Update usage limits file
+            update_usage_file(group["folder"])
 
             return result
 

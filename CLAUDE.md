@@ -61,6 +61,30 @@ Supports simple cron expressions:
 | `build_bwrap_args()` | Construct sandbox command |
 | `get_gh_token()` | Read GH token from hermit config |
 | `send_to_daemon()` | Client → daemon communication |
+| `calculate_usage()` | Calculate usage limits from session logs |
+| `update_usage_file()` | Write usage to workspace and central file |
+
+## Usage Limits
+
+Daemon tracks combined Claude usage (user + Hermit sessions) after each message.
+
+**Files written:**
+- `groups/<name>/.usage-limits.json` - for agent to read
+- `~/.claude/usage-limits.json` - for statusline to read
+
+**Format:**
+```json
+{
+  "plan": "max5x",
+  "5h": {"used": 1342893, "limit": 3300000, "pct": 40.7},
+  "7d": {"used": 14416633, "limit": 41666700, "pct": 34.6},
+  "updated_at": "2026-02-02T13:50:59+00:00"
+}
+```
+
+**Sources:**
+- Plan auto-detected from `~/.claude/.credentials.json` (`rateLimitTier`)
+- Credit rates from https://she-llac.com/claude-limits
 
 ## Security Architecture
 
