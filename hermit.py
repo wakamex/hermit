@@ -101,15 +101,24 @@ def build_bwrap_args(group: dict, env_vars: dict) -> list[str]:
         "--bind", str(group_path), "/workspace",
         # Home directory for Claude
         "--tmpfs", "/home",
+        "--dir", "/home/user",
         "--setenv", "HOME", "/home/user",
         "--setenv", "USER", "user",
-        # Working directory
+    ]
+
+    # Mount Claude auth if it exists (for Claude Max subscription)
+    claude_auth = Path.home() / ".claude"
+    if claude_auth.exists():
+        args.extend(["--ro-bind", str(claude_auth), "/home/user/.claude"])
+
+    # Working directory
+    args.extend([
         "--chdir", "/workspace",
         # Isolation
         "--unshare-all",
         "--share-net",  # Allow network for Claude API calls
         "--die-with-parent",
-    ]
+    ])
 
     # Add environment variables
     for key, value in env_vars.items():
@@ -123,18 +132,19 @@ def run_sandbox(group: dict, prompt: str) -> dict:
     # Environment variables for Claude
     env_vars = {}
 
-    # Check for API key or OAuth token
+    # Check for API key or OAuth token (only needed if ~/.claude auth doesn't exist)
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+    claude_auth_exists = (Path.home() / ".claude").exists()
 
     if oauth_token:
         env_vars["CLAUDE_CODE_OAUTH_TOKEN"] = oauth_token
     elif api_key:
         env_vars["ANTHROPIC_API_KEY"] = api_key
-    else:
+    elif not claude_auth_exists:
         return {
             "status": "error",
-            "error": "No ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN set"
+            "error": "No ~/.claude auth, ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN found"
         }
 
     bwrap_args = build_bwrap_args(group, env_vars)
