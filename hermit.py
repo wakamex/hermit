@@ -518,7 +518,11 @@ def get_plan() -> str:
 
 
 def calculate_usage() -> dict:
-    """Calculate usage from all session logs."""
+    """Calculate usage from local session logs.
+
+    Note: This is a lower bound - excludes web (claude.ai) usage.
+    Only counts Claude Code and Hermit sessions stored locally.
+    """
     now = datetime.now(timezone.utc)
     five_hours_ago = now - timedelta(hours=5)
     seven_days_ago = now - timedelta(days=7)

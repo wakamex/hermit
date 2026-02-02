@@ -66,7 +66,9 @@ Supports simple cron expressions:
 
 ## Usage Limits
 
-Daemon tracks combined Claude usage (user + Hermit sessions) after each message.
+Daemon tracks Claude Code + Hermit usage from local session logs.
+
+**Note:** This is a lower bound - excludes web (claude.ai) usage. Check https://claude.ai/settings/usage for actual totals.
 
 **Files written:**
 - `groups/<name>/.usage-limits.json` - for agent to read
