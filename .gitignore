@@ -12,3 +12,7 @@ venv/
 # IDE
 .idea/
 .vscode/
+
+# Agent credentials and sessions
+groups/*/.moltbook/
+groups/*/.claude/
